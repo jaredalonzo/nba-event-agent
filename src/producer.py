@@ -43,8 +43,10 @@ def fetch_plays(game_id: str) -> list[dict]:
     """
     pbp = playbyplayv3.PlayByPlayV3(game_id=game_id)
     df = pbp.get_data_frames()[0]  # df[1] is just video-availability metadata
-    # Pandas NaN doesn't round-trip through json.dumps; convert to None.
-    df = df.where(pd.notnull(df), None)
+    # Pandas NaN doesn't round-trip through json.dumps (emits non-standard `NaN`
+    # literal). Convert to object dtype first so None sticks even in numeric
+    # columns — in a plain float column, None gets silently re-cast to NaN.
+    df = df.astype(object).where(pd.notnull(df), None)
     return df.to_dict(orient="records")
 
 
