@@ -1,15 +1,25 @@
-"""Unit tests for src/agent.py — parse_clock and GameContextTracker.
+"""Unit tests for src/agent.py.
 
-Pure unit tests; no Kafka, no nba_api, no network. The graph-level tests
-called out in CLAUDE.md's TODOs will land once the LangGraph agent is in
-place (M3+).
+Covers:
+    - parse_clock (pure function)
+    - GameContextTracker (stateful, no I/O)
+    - Action enum (canonical string values)
+    - classify_event node (with LLM mocked)
+    - Compiled graph end-to-end (with LLM mocked)
+
+No real Kafka, nba_api, or Anthropic calls happen in this file. All LLM
+interactions are patched out at ``src.agent._llm``.
 """
 
 from __future__ import annotations
 
-import pytest
+from unittest.mock import MagicMock, patch
 
-from src.agent import GameContextTracker, parse_clock
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+from src.agent import GameContextTracker, _graph, classify_event, parse_clock
+from src.state import Action
 
 
 # --- Fixtures / helpers -----------------------------------------------------
@@ -216,3 +226,148 @@ class TestGameContextTrackerReturnValue:
         # Should be defensively copied (mutating it shouldn't affect internals).
         result["score_home"] = 999
         assert t.score_home == 2
+
+
+# --- Helpers for graph-related tests ----------------------------------------
+
+
+def make_state(**overrides) -> dict:
+    """Build a minimal AgentState dict for graph/node tests."""
+    base = {
+        "event": {
+            "actionNumber": 42,
+            "description": "Test event description",
+            "actionType": "Substitution",
+        },
+        "game_context": {
+            "period": 1,
+            "clock": "12:00",
+            "score_home": 0,
+            "score_away": 0,
+            "home_team": "GSW",
+            "away_team": "CLE",
+        },
+        "messages": [],
+        "action": Action.SKIPPED_OTHER,
+        "insight": None,
+    }
+    base.update(overrides)
+    return base
+
+
+# --- Action enum sanity -----------------------------------------------------
+
+
+class TestActionEnum:
+    def test_canonical_values(self) -> None:
+        # These string values are used in log lines and (in M5) persisted to
+        # insights.jsonl, so renames should fail the test loudly.
+        assert Action.ANALYZED.value == "analyzed"
+        assert Action.SKIPPED_EARLY_Q.value == "skipped_early_q"
+        assert Action.SKIPPED_ROUTINE.value == "skipped_routine"
+        assert Action.SKIPPED_OTHER.value == "skipped_other"
+
+    def test_action_is_str_compatible(self) -> None:
+        # Action inherits from str so json.dumps and == "literal" both work.
+        assert Action.ANALYZED == "analyzed"
+
+
+# --- classify_event node ----------------------------------------------------
+
+
+class TestClassifyEvent:
+    @patch("src.agent._llm")
+    def test_returns_action_and_appended_message(self, mock_llm: MagicMock) -> None:
+        mock_llm.invoke.return_value = AIMessage(content="skip")
+        result = classify_event(make_state())
+
+        assert result["action"] == Action.SKIPPED_OTHER
+        assert "messages" in result
+        assert len(result["messages"]) == 1
+        assert result["messages"][0].content == "skip"
+
+    @patch("src.agent._llm")
+    def test_llm_called_with_system_then_user(self, mock_llm: MagicMock) -> None:
+        mock_llm.invoke.return_value = AIMessage(content="skip")
+        classify_event(make_state())
+
+        mock_llm.invoke.assert_called_once()
+        call_messages = mock_llm.invoke.call_args[0][0]
+        assert len(call_messages) == 2
+        assert isinstance(call_messages[0], SystemMessage)
+        assert isinstance(call_messages[1], HumanMessage)
+
+    @patch("src.agent._llm")
+    def test_user_message_includes_event_and_context(
+        self, mock_llm: MagicMock
+    ) -> None:
+        mock_llm.invoke.return_value = AIMessage(content="skip")
+        state = make_state(
+            event={
+                "actionNumber": 207,
+                "description": "Irving Free Throw 1 of 1 (9 PTS)",
+                "actionType": "Free Throw",
+            },
+            game_context={
+                "period": 2,
+                "clock": "3:59",
+                "score_home": 38,
+                "score_away": 38,
+                "home_team": "GSW",
+                "away_team": "CLE",
+            },
+        )
+        classify_event(state)
+
+        user_msg = mock_llm.invoke.call_args[0][0][1].content
+        assert "207" in user_msg
+        assert "Irving Free Throw" in user_msg
+        assert "Free Throw" in user_msg
+        assert "3:59" in user_msg
+        assert "GSW" in user_msg
+        assert "CLE" in user_msg
+        assert "38" in user_msg
+
+    @patch("src.agent._llm")
+    def test_m3_always_returns_skipped_other(self, mock_llm: MagicMock) -> None:
+        # M3 stub behavior: action is hard-coded to SKIPPED_OTHER regardless of
+        # the model's response. M4 will replace this with real branching, and
+        # this test should be updated/deleted at that point.
+        mock_llm.invoke.return_value = AIMessage(content="this is not 'skip'")
+        result = classify_event(make_state())
+        assert result["action"] == Action.SKIPPED_OTHER
+
+
+# --- Compiled graph end-to-end ---------------------------------------------
+
+
+class TestCompiledGraph:
+    @patch("src.agent._llm")
+    def test_invoke_sets_action(self, mock_llm: MagicMock) -> None:
+        mock_llm.invoke.return_value = AIMessage(content="skip")
+        result = _graph.invoke(make_state())
+        assert result["action"] == Action.SKIPPED_OTHER
+
+    @patch("src.agent._llm")
+    def test_invoke_appends_message_via_reducer(self, mock_llm: MagicMock) -> None:
+        # add_messages should append rather than overwrite. Start with a prior
+        # message and verify both are present in the final state.
+        mock_llm.invoke.return_value = AIMessage(content="skip")
+        prior = AIMessage(content="previous turn")
+        result = _graph.invoke(make_state(messages=[prior]))
+
+        assert len(result["messages"]) == 2
+        assert result["messages"][0].content == "previous turn"
+        assert result["messages"][1].content == "skip"
+
+    @patch("src.agent._llm")
+    def test_invoke_preserves_event_and_game_context(
+        self, mock_llm: MagicMock
+    ) -> None:
+        mock_llm.invoke.return_value = AIMessage(content="skip")
+        state = make_state()
+        result = _graph.invoke(state)
+
+        assert result["event"] == state["event"]
+        assert result["game_context"] == state["game_context"]
+        assert result["insight"] is None
