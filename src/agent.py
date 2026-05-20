@@ -1,9 +1,11 @@
 """Kafka consumer + LangGraph agent for NBA play-by-play events.
 
 Filled out across milestones:
-    M2 (this file's current state): Consumer loop + GameContextTracker.
-    M3: Minimal LangGraph graph wired in (single classify_event node).
-    M4: Tools + agentic loop.
+    M2: Consumer loop + GameContextTracker.
+    M3 (current): Minimal LangGraph wired in — single classify_event node
+                  that always routes to END with action=SKIPPED_OTHER.
+                  Validates the plumbing before adding real classification.
+    M4: Tools + agentic loop with conditional edges.
     M5: generate_insight node + persistence.
 """
 
@@ -19,8 +21,15 @@ from typing import Any
 
 from confluent_kafka import Consumer, KafkaError
 from dotenv import load_dotenv
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.graph import END, START, StateGraph
 
-load_dotenv()
+from src.state import Action, AgentState
+
+# override=True so .env values trump pre-existing (empty) shell vars. Without
+# this, an empty ANTHROPIC_API_KEY in the shell silently shadows the real key.
+load_dotenv(override=True)
 
 BOOTSTRAP_SERVERS = os.environ["KAFKA_BOOTSTRAP_SERVERS"]
 TOPIC = os.environ["KAFKA_TOPIC"]
@@ -137,6 +146,73 @@ class GameContextTracker:
         }
 
 
+# --- LangGraph -------------------------------------------------------------
+
+# Model is module-level so we don't re-instantiate per event. The HTTP client
+# inside ChatAnthropic pools connections internally.
+_llm = ChatAnthropic(model="claude-sonnet-4-6", temperature=0)
+
+
+_M3_SYSTEM_PROMPT = """You are an event classifier for an NBA play-by-play stream.
+
+For this milestone, your only job is to respond with the word 'skip' for every
+event. Do not analyze, do not provide commentary, do not call any tools. Just
+respond 'skip'. We are validating the graph plumbing; real classification
+logic ships in a later milestone."""
+
+
+def classify_event(state: AgentState) -> dict:
+    """LLM call that decides whether to act on an event.
+
+    M3 behavior: ask the model to say 'skip' for every event. Always returns
+    Action.SKIPPED_OTHER. M4 will replace this with real notability heuristics
+    and tool-calling.
+    """
+    event = state["event"]
+    context = state["game_context"]
+
+    user_msg = (
+        f"Event #{event.get('actionNumber')}: {event.get('description')}\n"
+        f"Action type: {event.get('actionType')}\n"
+        f"Period: {context.get('period')}  Clock: {context.get('clock')}\n"
+        f"Score: {context.get('home_team')} {context.get('score_home')} - "
+        f"{context.get('score_away')} {context.get('away_team')}\n\n"
+        f"What should we do?"
+    )
+
+    response = _llm.invoke(
+        [
+            SystemMessage(content=_M3_SYSTEM_PROMPT),
+            HumanMessage(content=user_msg),
+        ]
+    )
+
+    return {
+        "messages": [response],
+        "action": Action.SKIPPED_OTHER,
+    }
+
+
+def build_graph():
+    """Compile the LangGraph for the NBA agent.
+
+    M3 shape:  START → classify_event → END
+    M4 will add a call_tools node and conditional edges back to classify_event.
+    """
+    g = StateGraph(AgentState)
+    g.add_node("classify_event", classify_event)
+    g.add_edge(START, "classify_event")
+    g.add_edge("classify_event", END)
+    return g.compile()
+
+
+# Compile once at import time. The graph is stateless across invocations.
+_graph = build_graph()
+
+
+# --- Kafka consumer --------------------------------------------------------
+
+
 def build_consumer() -> Consumer:
     """Construct the Kafka consumer with replay-friendly defaults.
 
@@ -192,6 +268,18 @@ def main() -> None:
             snapshot = tracker.update(event)
             processed += 1
 
+            # Invoke the graph. The model is called inside classify_event.
+            # In M3 every event routes straight to END with SKIPPED_OTHER.
+            initial_state: AgentState = {
+                "event": event,
+                "game_context": snapshot,
+                "messages": [],
+                "action": Action.SKIPPED_OTHER,
+                "insight": None,
+            }
+            final_state = _graph.invoke(initial_state)
+            action = final_state["action"]
+
             desc = event.get("description") or "(no description)"
             score_str = (
                 f"{snapshot['home_team'] or 'HOME'} {snapshot['score_home']} - "
@@ -200,7 +288,7 @@ def main() -> None:
             print(
                 f"[#{event.get('actionNumber', '?'):>3} "
                 f"Q{snapshot['period']} {snapshot['clock']:>5}]  "
-                f"{score_str:<22}  {desc}",
+                f"{score_str:<22}  {desc:<55}  → {action}",
                 flush=True,
             )
 

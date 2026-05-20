@@ -208,10 +208,10 @@ docker-compose up -d
 pip install -r requirements.txt
 
 # 3. Start the agent (consumer)
-python src/agent.py
+python -m src.agent
 
 # 4. In a separate terminal, run the producer
-python src/producer.py
+python -m src.producer
 ```
 
 ---

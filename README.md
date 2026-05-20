@@ -142,10 +142,10 @@ Three terminals:
 docker compose up -d
 
 # Terminal 2: start the agent (consumer)
-python src/agent.py
+python -m src.agent
 
 # Terminal 3: start the producer (in another terminal so you can watch both)
-python src/producer.py
+python -m src.producer
 ```
 
 The producer streams 467 plays from Game 7 at a configurable delay (`PRODUCER_DELAY_SECONDS`, default 0.5s). The agent prints classification decisions in real time and writes notable insights to `data/insights.jsonl`.
