@@ -31,7 +31,7 @@ nba-agent/
 ├── CLAUDE.md
 ├── docker-compose.yml        # Kafka + Zookeeper
 ├── requirements.txt
-├── .env                      # ANTHROPIC_API_KEY, Kafka config
+├── .env.example              # template; copy to .env and fill in (gitignored)
 ├── src/
 │   ├── producer.py           # Fetches nba_api data, publishes to Kafka
 │   ├── agent.py              # LangGraph graph definition + Kafka consumer loop
@@ -229,9 +229,8 @@ python -m src.producer
 
 Open items deferred from the first pass. Address before considering the project portfolio-ready.
 
-- [ ] **Flesh out the test plan.** `tests/test_tools.py` and `tests/test_agent.py` are stubs. At minimum:
-  - Unit tests for each tool with `nba_api` mocked (no live HTTP in CI).
-  - A graph-level test that feeds a known notable event (e.g., a Q4 lead-cut play from Game 7) and asserts `state.insight is not None` and `state.action == Action.ANALYZED`.
-  - A skip-path test: feed a Q1 routine free throw and assert `state.insight is None` and `state.action` is one of the `SKIPPED_*` values.
-- [ ] **Replace `.env` with `.env.example` in the repo.** The structure diagram lists `.env`, but `.env` should be gitignored. Commit `.env.example` with empty placeholders and update the diagram + README accordingly.
+- [x] **Flesh out the test plan.** ~~Tests are stubs.~~ Done — 96 unit tests
+  across producer, tools, output, and agent helpers. A graph-level
+  happy-path test (mocking both LLMs) is still missing as a nice-to-have.
+- [x] **Replace `.env` with `.env.example` in the repo.** Done.
 - [ ] **Pull the MCP server tool forward from Phase 2.** An MCP-backed `get_player_profile` (career stats, bio, recent news) is a stronger portfolio differentiator than the other Phase 2 items. Consider promoting it into Phase 1 scope and demoting FastAPI/LangSmith.

@@ -86,7 +86,7 @@ Routine free throws, substitutions, and early-quarter timeouts are skipped witho
 nba-event-agent/
 ├── docker-compose.yml      # Zookeeper + Kafka
 ├── requirements.txt
-├── .env                    # ANTHROPIC_API_KEY, Kafka config
+├── .env.example            # template; copy to .env (gitignored)
 ├── src/
 │   ├── producer.py         # nba_api → Kafka
 │   ├── agent.py            # LangGraph graph + consumer loop
@@ -122,15 +122,9 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Configure environment (create .env with these vars)
-cat > .env <<'EOF'
-ANTHROPIC_API_KEY=sk-ant-...
-KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-KAFKA_TOPIC=nba.plays
-KAFKA_GROUP_ID=nba-agent-group
-NBA_GAME_ID=0041500407
-PRODUCER_DELAY_SECONDS=0.5
-EOF
+# Configure environment — copy the template and fill in your API key
+cp .env.example .env
+# then edit .env and set ANTHROPIC_API_KEY (the other defaults are fine)
 ```
 
 ### Run
