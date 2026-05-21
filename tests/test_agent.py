@@ -27,6 +27,7 @@ from src.agent import (
     GameContextTracker,
     _parse_action_from_text,
     _parse_narrator_response,
+    _process_event,
     _summarize_tool_results,
     finalize,
     generate_insight,
@@ -557,3 +558,94 @@ class TestGenerateInsight:
         user_content = sent_messages[1].content
         assert "27" in user_content
         assert "get_player_stats" in user_content
+
+
+# --- _process_event dedup --------------------------------------------------
+
+
+class TestProcessEventDedup:
+    """PlayByPlayV3 sometimes emits two events per actionNumber (e.g. turnover
+    + steal). The graph should only be invoked once per (gameId, actionNumber),
+    but the tracker should fold both halves so foul/scoring state stays right.
+    """
+
+    @patch("src.agent._graph")
+    def test_duplicate_action_number_invokes_graph_once(
+        self, mock_graph: MagicMock
+    ) -> None:
+        mock_graph.invoke.return_value = {
+            "action": Action.SKIPPED_OTHER,
+            "severity": None,
+            "messages": [],
+        }
+        tracker = GameContextTracker()
+        seen: set = set()
+
+        offensive = make_event(
+            actionNumber=734,
+            personId=201939,
+            playerName="Strus",
+            description="Strus Turnover",
+            actionType="Turnover",
+        )
+        defensive = make_event(
+            actionNumber=734,
+            personId=2544,
+            playerName="Bridges",
+            description="Bridges Steal",
+            actionType="Steal",
+        )
+
+        _process_event(offensive, tracker, seen)
+        _process_event(defensive, tracker, seen)
+
+        assert mock_graph.invoke.call_count == 1
+        # First call should have seen the offensive event.
+        invoked_state = mock_graph.invoke.call_args_list[0][0][0]
+        assert invoked_state["event"]["description"] == "Strus Turnover"
+
+    @patch("src.agent._graph")
+    def test_tracker_still_updates_on_duplicate(
+        self, mock_graph: MagicMock
+    ) -> None:
+        # Even when the graph is deduped, both halves must flow through the
+        # tracker so foul counts and scoring stay accurate.
+        mock_graph.invoke.return_value = {
+            "action": Action.SKIPPED_OTHER,
+            "severity": None,
+            "messages": [],
+        }
+        tracker = GameContextTracker()
+        seen: set = set()
+
+        # Two foul-adjacent events sharing an actionNumber but different
+        # personIds — both fouls should be counted.
+        first = make_event(
+            actionNumber=200, personId=111, actionType="Foul"
+        )
+        second = make_event(
+            actionNumber=200, personId=222, actionType="Foul"
+        )
+
+        _process_event(first, tracker, seen)
+        _process_event(second, tracker, seen)
+
+        assert mock_graph.invoke.call_count == 1
+        assert tracker.player_fouls == {111: 1, 222: 1}
+
+    @patch("src.agent._graph")
+    def test_distinct_action_numbers_both_invoke_graph(
+        self, mock_graph: MagicMock
+    ) -> None:
+        mock_graph.invoke.return_value = {
+            "action": Action.SKIPPED_OTHER,
+            "severity": None,
+            "messages": [],
+        }
+        tracker = GameContextTracker()
+        seen: set = set()
+
+        _process_event(make_event(actionNumber=10), tracker, seen)
+        _process_event(make_event(actionNumber=11), tracker, seen)
+
+        assert mock_graph.invoke.call_count == 2
