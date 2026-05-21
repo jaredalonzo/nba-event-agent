@@ -2,10 +2,11 @@
 
 Filled out across milestones:
     M2: Consumer loop + GameContextTracker.
-    M3 (current): Minimal LangGraph wired in — single classify_event node
-                  that always routes to END with action=SKIPPED_OTHER.
-                  Validates the plumbing before adding real classification.
-    M4: Tools + agentic loop with conditional edges.
+    M3: Minimal LangGraph wired in (single classify_event node, always skip).
+    M4 (current): Agentic loop with real notability classifier.
+                  classify_event uses bound tools; ToolNode handles tool
+                  execution and loops back. A finalize node parses the
+                  classifier's final plain-text decision into an Action.
     M5: generate_insight node + persistence.
 """
 
@@ -22,10 +23,12 @@ from typing import Any
 from confluent_kafka import Consumer, KafkaError
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
 
 from src.state import Action, AgentState
+from src.tools import AGENT_TOOLS
 
 # override=True so .env values trump pre-existing (empty) shell vars. Without
 # this, an empty ANTHROPIC_API_KEY in the shell silently shadows the real key.
@@ -151,58 +154,151 @@ class GameContextTracker:
 # Model is module-level so we don't re-instantiate per event. The HTTP client
 # inside ChatAnthropic pools connections internally.
 _llm = ChatAnthropic(model="claude-sonnet-4-6", temperature=0)
+_llm_with_tools = _llm.bind_tools(AGENT_TOOLS)
 
 
-_M3_SYSTEM_PROMPT = """You are an event classifier for an NBA play-by-play stream.
+CLASSIFIER_SYSTEM_PROMPT = """You are a real-time analyst for NBA play-by-play events.
+For each event, decide whether it warrants a deeper insight or should be skipped.
 
-For this milestone, your only job is to respond with the word 'skip' for every
-event. Do not analyze, do not provide commentary, do not call any tools. Just
-respond 'skip'. We are validating the graph plumbing; real classification
-logic ships in a later milestone."""
+NOTABLE events (worth an insight) include:
+- A scoring play that creates or cuts a lead to 5 points or fewer in Q4
+- A player approaching or hitting an in-game stat milestone (20 pts, 10 reb, or 10 ast)
+- Three consecutive scoring plays by the same team (a momentum run)
+- A foul on a player who already has 5 fouls (foul trouble)
+- Any event in the final 2 minutes of Q4 or overtime
+
+SKIP routine events that don't need narrative:
+- Free throws in a non-close game
+- Substitutions
+- Timeouts in early quarters (Q1, Q2)
+- Rebounds, missed shots, or jump balls with no game-state implication
+
+You have two tools available:
+- get_player_stats(player_id, game_id): the player's current box-score line
+- analyze_momentum(): the last 5 scoring plays and the recent momentum picture
+
+Use tools only when needed. For obviously routine events, skip without
+calling any tools. For potentially notable events, gather just enough context
+to decide.
+
+When you've made your decision, respond with EXACTLY ONE LINE in this format:
+- "ANALYZE: <one-sentence reason>" — the event warrants an insight
+- "SKIP_ROUTINE: <reason>" — routine play (FT, sub, timeout)
+- "SKIP_EARLY: <reason>" — low-stakes Q1–Q3 event
+- "SKIP_OTHER: <reason>" — any other reason to skip
+
+Do not produce any text after the decision line.
+"""
+
+
+def _build_user_message(event: dict, context: dict) -> str:
+    """Format a per-event user prompt for the classifier."""
+    return (
+        f"Event #{event.get('actionNumber')}: {event.get('description')}\n"
+        f"Action type: {event.get('actionType')}  "
+        f"Sub-type: {event.get('subType') or '—'}\n"
+        f"Player: {event.get('playerName') or '—'}  "
+        f"personId: {event.get('personId') or '—'}\n"
+        f"Period: {context.get('period')}  Clock: {context.get('clock')}\n"
+        f"Score: {context.get('home_team')} {context.get('score_home')} - "
+        f"{context.get('score_away')} {context.get('away_team')}\n"
+        f"Game ID: {event.get('gameId')}\n\n"
+        f"Decide whether this event is notable."
+    )
 
 
 def classify_event(state: AgentState) -> dict:
-    """LLM call that decides whether to act on an event.
+    """LLM call. May emit tool calls (loop continues) or a plain-text decision.
 
-    M3 behavior: ask the model to say 'skip' for every event. Always returns
-    Action.SKIPPED_OTHER. M4 will replace this with real notability heuristics
-    and tool-calling.
+    On first entry the message history is empty and we seed it with system +
+    user. On loop re-entry (after call_tools returned tool results) the prior
+    messages are present in state["messages"] and we feed them all back to
+    the model so it can incorporate the tool results.
     """
     event = state["event"]
     context = state["game_context"]
+    prior = state.get("messages", [])
 
-    user_msg = (
-        f"Event #{event.get('actionNumber')}: {event.get('description')}\n"
-        f"Action type: {event.get('actionType')}\n"
-        f"Period: {context.get('period')}  Clock: {context.get('clock')}\n"
-        f"Score: {context.get('home_team')} {context.get('score_home')} - "
-        f"{context.get('score_away')} {context.get('away_team')}\n\n"
-        f"What should we do?"
-    )
-
-    response = _llm.invoke(
-        [
-            SystemMessage(content=_M3_SYSTEM_PROMPT),
-            HumanMessage(content=user_msg),
+    if not prior:
+        messages = [
+            SystemMessage(content=CLASSIFIER_SYSTEM_PROMPT),
+            HumanMessage(content=_build_user_message(event, context)),
         ]
-    )
+    else:
+        # Loop re-entry: replay the full history so the model sees tool results.
+        # System prompt isn't re-sent — it's already in prior[0].
+        messages = list(prior)
 
-    return {
-        "messages": [response],
-        "action": Action.SKIPPED_OTHER,
-    }
+    response = _llm_with_tools.invoke(messages)
+    # On first entry we also append the system + user that we constructed,
+    # so subsequent passes through this node have the full history. The
+    # `finalize` node owns setting `action`.
+    new_messages = [*messages, response] if not prior else [response]
+    return {"messages": new_messages}
+
+
+def route_after_classify(state: AgentState) -> str:
+    """Conditional edge: tool calls go to call_tools, plain text goes to finalize."""
+    last = state["messages"][-1]
+    if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+        return "call_tools"
+    return "finalize"
+
+
+_ACTION_PREFIXES = {
+    "ANALYZE": Action.ANALYZED,
+    "READY": Action.ANALYZED,  # accept either prefix for forgiveness
+    "SKIP_ROUTINE": Action.SKIPPED_ROUTINE,
+    "SKIPPED_ROUTINE": Action.SKIPPED_ROUTINE,
+    "SKIP_EARLY": Action.SKIPPED_EARLY_Q,
+    "SKIPPED_EARLY": Action.SKIPPED_EARLY_Q,
+    "SKIP_OTHER": Action.SKIPPED_OTHER,
+    "SKIPPED_OTHER": Action.SKIPPED_OTHER,
+    "SKIP": Action.SKIPPED_OTHER,  # bare 'skip' from M3-style replies
+}
+
+
+def _parse_action_from_text(text: str) -> Action:
+    """Map the classifier's plain-text decision to an Action."""
+    if not text:
+        return Action.SKIPPED_OTHER
+    head = text.strip().upper()
+    for prefix, action in _ACTION_PREFIXES.items():
+        if head.startswith(prefix):
+            return action
+    return Action.SKIPPED_OTHER
+
+
+def finalize(state: AgentState) -> dict:
+    """Terminal node: parse the classifier's last message and set state.action."""
+    last = state["messages"][-1]
+    content = getattr(last, "content", "") or ""
+    return {"action": _parse_action_from_text(content)}
 
 
 def build_graph():
     """Compile the LangGraph for the NBA agent.
 
-    M3 shape:  START → classify_event → END
-    M4 will add a call_tools node and conditional edges back to classify_event.
+    M4 shape:
+                          ┌──────────┐
+                          ▼          │
+        START → classify_event → call_tools
+                  │
+                  └→ finalize → END
     """
     g = StateGraph(AgentState)
     g.add_node("classify_event", classify_event)
+    g.add_node("call_tools", ToolNode(AGENT_TOOLS))
+    g.add_node("finalize", finalize)
+
     g.add_edge(START, "classify_event")
-    g.add_edge("classify_event", END)
+    g.add_conditional_edges(
+        "classify_event",
+        route_after_classify,
+        {"call_tools": "call_tools", "finalize": "finalize"},
+    )
+    g.add_edge("call_tools", "classify_event")
+    g.add_edge("finalize", END)
     return g.compile()
 
 
@@ -268,8 +364,8 @@ def main() -> None:
             snapshot = tracker.update(event)
             processed += 1
 
-            # Invoke the graph. The model is called inside classify_event.
-            # In M3 every event routes straight to END with SKIPPED_OTHER.
+            # Invoke the graph. classify_event may call tools (looping back
+            # through call_tools) before finalize sets state.action.
             initial_state: AgentState = {
                 "event": event,
                 "game_context": snapshot,
@@ -280,15 +376,24 @@ def main() -> None:
             final_state = _graph.invoke(initial_state)
             action = final_state["action"]
 
+            # Count tool calls (visible in the message history) so the log
+            # shows when the agent did real work vs. shallow skips.
+            tool_call_count = sum(
+                len(getattr(m, "tool_calls", []) or [])
+                for m in final_state.get("messages", [])
+                if isinstance(m, AIMessage)
+            )
+
             desc = event.get("description") or "(no description)"
             score_str = (
                 f"{snapshot['home_team'] or 'HOME'} {snapshot['score_home']} - "
                 f"{snapshot['score_away']} {snapshot['away_team'] or 'AWAY'}"
             )
+            tool_hint = f"  [tools={tool_call_count}]" if tool_call_count else ""
             print(
                 f"[#{event.get('actionNumber', '?'):>3} "
                 f"Q{snapshot['period']} {snapshot['clock']:>5}]  "
-                f"{score_str:<22}  {desc:<55}  → {action}",
+                f"{score_str:<22}  {desc:<55}  → {action}{tool_hint}",
                 flush=True,
             )
 

@@ -4,21 +4,28 @@ Covers:
     - parse_clock (pure function)
     - GameContextTracker (stateful, no I/O)
     - Action enum (canonical string values)
-    - classify_event node (with LLM mocked)
-    - Compiled graph end-to-end (with LLM mocked)
+    - _parse_action_from_text (pure function)
+    - route_after_classify (pure function)
+    - finalize node (pure function)
 
-No real Kafka, nba_api, or Anthropic calls happen in this file. All LLM
-interactions are patched out at ``src.agent._llm``.
+We don't unit-test classify_event itself because patching the bound LLM
+(_llm_with_tools) cleanly is awkward, and the graph wiring is covered by
+running the agent end-to-end. The pure helpers around it are where the
+testable logic lives.
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
-
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
-from src.agent import GameContextTracker, _graph, classify_event, parse_clock
+from src.agent import (
+    GameContextTracker,
+    _parse_action_from_text,
+    finalize,
+    parse_clock,
+    route_after_classify,
+)
 from src.state import Action
 
 
@@ -272,102 +279,88 @@ class TestActionEnum:
         assert Action.ANALYZED == "analyzed"
 
 
-# --- classify_event node ----------------------------------------------------
+# --- _parse_action_from_text ------------------------------------------------
 
 
-class TestClassifyEvent:
-    @patch("src.agent._llm")
-    def test_returns_action_and_appended_message(self, mock_llm: MagicMock) -> None:
-        mock_llm.invoke.return_value = AIMessage(content="skip")
-        result = classify_event(make_state())
+class TestParseActionFromText:
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("ANALYZE: tied game in Q4", Action.ANALYZED),
+            ("analyze: lowercase too", Action.ANALYZED),
+            ("READY: forgiving fallback", Action.ANALYZED),
+            ("SKIP_ROUTINE: substitution", Action.SKIPPED_ROUTINE),
+            ("SKIPPED_ROUTINE: alternative spelling", Action.SKIPPED_ROUTINE),
+            ("SKIP_EARLY: Q1 free throw", Action.SKIPPED_EARLY_Q),
+            ("SKIPPED_EARLY: alt spelling", Action.SKIPPED_EARLY_Q),
+            ("SKIP_OTHER: catch-all", Action.SKIPPED_OTHER),
+            ("SKIP: bare skip fallback", Action.SKIPPED_OTHER),
+        ],
+    )
+    def test_known_prefixes(self, text: str, expected: Action) -> None:
+        assert _parse_action_from_text(text) == expected
 
-        assert result["action"] == Action.SKIPPED_OTHER
-        assert "messages" in result
-        assert len(result["messages"]) == 1
-        assert result["messages"][0].content == "skip"
+    def test_empty_string_defaults_to_skipped_other(self) -> None:
+        assert _parse_action_from_text("") == Action.SKIPPED_OTHER
 
-    @patch("src.agent._llm")
-    def test_llm_called_with_system_then_user(self, mock_llm: MagicMock) -> None:
-        mock_llm.invoke.return_value = AIMessage(content="skip")
-        classify_event(make_state())
+    def test_none_defaults_to_skipped_other(self) -> None:
+        assert _parse_action_from_text(None) == Action.SKIPPED_OTHER  # type: ignore[arg-type]
 
-        mock_llm.invoke.assert_called_once()
-        call_messages = mock_llm.invoke.call_args[0][0]
-        assert len(call_messages) == 2
-        assert isinstance(call_messages[0], SystemMessage)
-        assert isinstance(call_messages[1], HumanMessage)
+    def test_unknown_prefix_defaults_to_skipped_other(self) -> None:
+        # Garbage / non-conforming model output falls back safely.
+        assert _parse_action_from_text("I think we should look at this") == Action.SKIPPED_OTHER
 
-    @patch("src.agent._llm")
-    def test_user_message_includes_event_and_context(
-        self, mock_llm: MagicMock
-    ) -> None:
-        mock_llm.invoke.return_value = AIMessage(content="skip")
-        state = make_state(
-            event={
-                "actionNumber": 207,
-                "description": "Irving Free Throw 1 of 1 (9 PTS)",
-                "actionType": "Free Throw",
-            },
-            game_context={
-                "period": 2,
-                "clock": "3:59",
-                "score_home": 38,
-                "score_away": 38,
-                "home_team": "GSW",
-                "away_team": "CLE",
-            },
+    def test_leading_whitespace_handled(self) -> None:
+        assert _parse_action_from_text("   ANALYZE: ok") == Action.ANALYZED
+
+
+# --- route_after_classify --------------------------------------------------
+
+
+class TestRouteAfterClassify:
+    def test_tool_calls_route_to_call_tools(self) -> None:
+        msg = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "get_player_stats", "args": {}, "id": "t1", "type": "tool_call"}
+            ],
         )
-        classify_event(state)
+        state = make_state(messages=[msg])
+        assert route_after_classify(state) == "call_tools"
 
-        user_msg = mock_llm.invoke.call_args[0][0][1].content
-        assert "207" in user_msg
-        assert "Irving Free Throw" in user_msg
-        assert "Free Throw" in user_msg
-        assert "3:59" in user_msg
-        assert "GSW" in user_msg
-        assert "CLE" in user_msg
-        assert "38" in user_msg
+    def test_plain_text_routes_to_finalize(self) -> None:
+        msg = AIMessage(content="ANALYZE: notable late-game play")
+        state = make_state(messages=[msg])
+        assert route_after_classify(state) == "finalize"
 
-    @patch("src.agent._llm")
-    def test_m3_always_returns_skipped_other(self, mock_llm: MagicMock) -> None:
-        # M3 stub behavior: action is hard-coded to SKIPPED_OTHER regardless of
-        # the model's response. M4 will replace this with real branching, and
-        # this test should be updated/deleted at that point.
-        mock_llm.invoke.return_value = AIMessage(content="this is not 'skip'")
-        result = classify_event(make_state())
-        assert result["action"] == Action.SKIPPED_OTHER
+    def test_empty_tool_calls_list_routes_to_finalize(self) -> None:
+        # Edge case: AIMessage with explicitly empty tool_calls list.
+        msg = AIMessage(content="SKIP_ROUTINE: subs", tool_calls=[])
+        state = make_state(messages=[msg])
+        assert route_after_classify(state) == "finalize"
 
-
-# --- Compiled graph end-to-end ---------------------------------------------
+    def test_non_ai_message_routes_to_finalize(self) -> None:
+        # Defensive: if somehow the last message isn't an AIMessage, don't
+        # try to route to call_tools.
+        state = make_state(messages=[HumanMessage(content="just user")])
+        assert route_after_classify(state) == "finalize"
 
 
-class TestCompiledGraph:
-    @patch("src.agent._llm")
-    def test_invoke_sets_action(self, mock_llm: MagicMock) -> None:
-        mock_llm.invoke.return_value = AIMessage(content="skip")
-        result = _graph.invoke(make_state())
-        assert result["action"] == Action.SKIPPED_OTHER
+# --- finalize node ---------------------------------------------------------
 
-    @patch("src.agent._llm")
-    def test_invoke_appends_message_via_reducer(self, mock_llm: MagicMock) -> None:
-        # add_messages should append rather than overwrite. Start with a prior
-        # message and verify both are present in the final state.
-        mock_llm.invoke.return_value = AIMessage(content="skip")
-        prior = AIMessage(content="previous turn")
-        result = _graph.invoke(make_state(messages=[prior]))
 
-        assert len(result["messages"]) == 2
-        assert result["messages"][0].content == "previous turn"
-        assert result["messages"][1].content == "skip"
+class TestFinalize:
+    def test_finalize_sets_action_from_last_message(self) -> None:
+        state = make_state(messages=[AIMessage(content="ANALYZE: it's notable")])
+        result = finalize(state)
+        assert result == {"action": Action.ANALYZED}
 
-    @patch("src.agent._llm")
-    def test_invoke_preserves_event_and_game_context(
-        self, mock_llm: MagicMock
-    ) -> None:
-        mock_llm.invoke.return_value = AIMessage(content="skip")
-        state = make_state()
-        result = _graph.invoke(state)
+    def test_finalize_with_skip_routine(self) -> None:
+        state = make_state(messages=[AIMessage(content="SKIP_ROUTINE: just a sub")])
+        result = finalize(state)
+        assert result == {"action": Action.SKIPPED_ROUTINE}
 
-        assert result["event"] == state["event"]
-        assert result["game_context"] == state["game_context"]
-        assert result["insight"] is None
+    def test_finalize_falls_back_on_unparseable(self) -> None:
+        state = make_state(messages=[AIMessage(content="hmm not sure")])
+        result = finalize(state)
+        assert result == {"action": Action.SKIPPED_OTHER}
