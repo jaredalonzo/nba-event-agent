@@ -3,11 +3,16 @@
 Filled out across milestones:
     M2: Consumer loop + GameContextTracker.
     M3: Minimal LangGraph wired in (single classify_event node, always skip).
-    M4 (current): Agentic loop with real notability classifier.
+    M4:           Agentic loop with real notability classifier.
                   classify_event uses bound tools; ToolNode handles tool
                   execution and loops back. A finalize node parses the
                   classifier's final plain-text decision into an Action.
-    M5: generate_insight node + persistence.
+    M5 (current): generate_insight node + send_alert tool + persistence.
+                  After classify_event returns ANALYZE, a separate LLM call
+                  produces a 2–3 sentence ESPN-style narrative. The result is
+                  emitted as a synthetic send_alert tool call, which the
+                  PERSIST_TOOLS ToolNode runs to append the insight to
+                  data/insights.jsonl.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ import json
 import os
 import signal
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,7 +34,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from src.state import Action, AgentState
-from src.tools import AGENT_TOOLS
+from src.tools import AGENT_TOOLS, PERSIST_TOOLS
 
 # override=True so .env values trump pre-existing (empty) shell vars. Without
 # this, an empty ANTHROPIC_API_KEY in the shell silently shadows the real key.
@@ -156,6 +162,10 @@ class GameContextTracker:
 _llm = ChatAnthropic(model="claude-sonnet-4-6", temperature=0)
 _llm_with_tools = _llm.bind_tools(AGENT_TOOLS)
 
+# Separate, no-tools client for the narrative pass. A higher temperature gives
+# the ESPN voice a bit of personality without going off the rails.
+_narrator = ChatAnthropic(model="claude-sonnet-4-6", temperature=0.4)
+
 
 CLASSIFIER_SYSTEM_PROMPT = """You are a real-time analyst for NBA play-by-play events.
 For each event, decide whether it warrants a deeper insight or should be skipped.
@@ -237,14 +247,6 @@ def classify_event(state: AgentState) -> dict:
     return {"messages": new_messages}
 
 
-def route_after_classify(state: AgentState) -> str:
-    """Conditional edge: tool calls go to call_tools, plain text goes to finalize."""
-    last = state["messages"][-1]
-    if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
-        return "call_tools"
-    return "finalize"
-
-
 _ACTION_PREFIXES = {
     "ANALYZE": Action.ANALYZED,
     "READY": Action.ANALYZED,  # accept either prefix for forgiveness
@@ -269,35 +271,198 @@ def _parse_action_from_text(text: str) -> Action:
     return Action.SKIPPED_OTHER
 
 
+def route_after_classify(state: AgentState) -> str:
+    """Conditional edge: dispatch the classifier's last message.
+
+    Three possible outcomes:
+        - The message has tool_calls → loop back through call_tools.
+        - The message's text starts with ANALYZE / READY → generate an insight.
+        - Anything else (SKIP_* or unknown) → finalize and end.
+    """
+    last = state["messages"][-1]
+    if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+        return "call_tools"
+    content = getattr(last, "content", "") or ""
+    parsed = _parse_action_from_text(content)
+    if parsed == Action.ANALYZED:
+        return "generate_insight"
+    return "finalize"
+
+
 def finalize(state: AgentState) -> dict:
-    """Terminal node: parse the classifier's last message and set state.action."""
+    """Skip-path terminal: parse the classifier's last decision into an Action.
+
+    Only reached on SKIP_* outcomes. The analyze path bypasses this node and
+    sets ``action = ANALYZED`` directly from ``generate_insight``.
+    """
     last = state["messages"][-1]
     content = getattr(last, "content", "") or ""
     return {"action": _parse_action_from_text(content)}
 
 
+# --- Insight generation ----------------------------------------------------
+
+INSIGHT_SYSTEM_PROMPT = """You are an NBA broadcast analyst writing real-time insights.
+Given the event, the game context, and any stats the classifier gathered, produce a
+2–3 sentence ESPN-style narrative.
+
+Voice guidance:
+- Active, energetic, but not breathless.
+- Reference specific numbers when they were fetched (points, momentum, fouls).
+- Tie the moment to the game situation (lead, quarter, time remaining).
+- No play-by-play recitation — interpret the moment.
+
+Also assign a severity:
+- "critical" — game-deciding moments, late-Q4 lead changes, OT, milestones reached.
+- "notable" — momentum shifts, foul trouble for a star, sustained runs.
+- "routine" — should rarely fire from this node; default to "notable" if unsure.
+
+Respond in EXACTLY this format, no preamble:
+
+SEVERITY: <critical|notable|routine>
+INSIGHT: <2–3 sentence narrative>
+"""
+
+
+def _build_narrator_user_message(event: dict, context: dict, tool_summary: str) -> str:
+    """Compact user-side prompt for the narrator. Includes any tool results."""
+    home = context.get("home_team") or "HOME"
+    away = context.get("away_team") or "AWAY"
+    score_line = (
+        f"{home} {context.get('score_home', 0)} - "
+        f"{context.get('score_away', 0)} {away}"
+    )
+    base = (
+        f"Event: {event.get('description')}\n"
+        f"Player: {event.get('playerName') or '—'}\n"
+        f"Period: Q{context.get('period')}  Clock: {context.get('clock')}\n"
+        f"Score: {score_line}\n"
+    )
+    if tool_summary:
+        base += f"\nGathered context:\n{tool_summary}\n"
+    return base
+
+
+def _summarize_tool_results(messages: list) -> str:
+    """Flatten any ToolMessage contents from the classifier loop into a string."""
+    from langchain_core.messages import ToolMessage
+
+    chunks: list[str] = []
+    for m in messages:
+        if isinstance(m, ToolMessage):
+            # ToolMessage.content can be str or list[dict]; coerce to str.
+            content = m.content
+            if isinstance(content, list):
+                content = json.dumps(content)
+            chunks.append(f"- {m.name}: {content}")
+    return "\n".join(chunks)
+
+
+_SEVERITY_LINE = "SEVERITY:"
+_INSIGHT_LINE = "INSIGHT:"
+
+
+def _parse_narrator_response(text: str) -> tuple[str, str]:
+    """Pull SEVERITY and INSIGHT out of the narrator's reply.
+
+    Tolerant of stray whitespace and the narrator wrapping the insight onto
+    multiple lines (we collect everything after ``INSIGHT:``).
+    """
+    severity = "notable"
+    insight_parts: list[str] = []
+    collecting_insight = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.upper().startswith(_SEVERITY_LINE):
+            severity = line.split(":", 1)[1].strip().lower() or "notable"
+            collecting_insight = False
+        elif line.upper().startswith(_INSIGHT_LINE):
+            insight_parts.append(line.split(":", 1)[1].strip())
+            collecting_insight = True
+        elif collecting_insight and line:
+            insight_parts.append(line)
+    insight = " ".join(insight_parts).strip()
+    if not insight:
+        # Narrator didn't follow the format. Fall back to using whatever it
+        # produced so we don't drop the work on the floor.
+        insight = text.strip()
+    return severity, insight
+
+
+def generate_insight(state: AgentState) -> dict:
+    """Second LLM pass: turn classifier context into an ESPN-style narrative.
+
+    Emits a synthetic ``send_alert`` tool call so the downstream ToolNode
+    persists the insight without us having to call ``log_insight`` directly.
+    """
+    event = state["event"]
+    context = state["game_context"]
+    tool_summary = _summarize_tool_results(state.get("messages", []))
+
+    messages = [
+        SystemMessage(content=INSIGHT_SYSTEM_PROMPT),
+        HumanMessage(
+            content=_build_narrator_user_message(event, context, tool_summary)
+        ),
+    ]
+    response = _narrator.invoke(messages)
+    severity, insight = _parse_narrator_response(response.content or "")
+
+    # Build an AIMessage with a synthetic tool_call for send_alert. ToolNode
+    # then runs the @tool, which writes the JSONL line. The id matters because
+    # ToolNode matches the resulting ToolMessage back to this tool_call.
+    persist_call = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "send_alert",
+                "args": {"insight": insight, "severity": severity},
+                "id": f"send_alert_{uuid.uuid4().hex[:8]}",
+            }
+        ],
+    )
+
+    return {
+        "insight": insight,
+        "severity": severity,
+        "action": Action.ANALYZED,
+        "messages": [persist_call],
+    }
+
+
 def build_graph():
     """Compile the LangGraph for the NBA agent.
 
-    M4 shape:
-                          ┌──────────┐
-                          ▼          │
-        START → classify_event → call_tools
-                  │
-                  └→ finalize → END
+    M5 shape::
+
+                              ┌────────────────┐
+                              ▼                │
+            START → classify_event → call_tools
+                      │
+                      ├─ ANALYZE → generate_insight → send_alert (ToolNode) → END
+                      │
+                      └─ SKIP_*  → finalize → END
     """
     g = StateGraph(AgentState)
     g.add_node("classify_event", classify_event)
     g.add_node("call_tools", ToolNode(AGENT_TOOLS))
+    g.add_node("generate_insight", generate_insight)
+    g.add_node("send_alert", ToolNode(PERSIST_TOOLS))
     g.add_node("finalize", finalize)
 
     g.add_edge(START, "classify_event")
     g.add_conditional_edges(
         "classify_event",
         route_after_classify,
-        {"call_tools": "call_tools", "finalize": "finalize"},
+        {
+            "call_tools": "call_tools",
+            "generate_insight": "generate_insight",
+            "finalize": "finalize",
+        },
     )
     g.add_edge("call_tools", "classify_event")
+    g.add_edge("generate_insight", "send_alert")
+    g.add_edge("send_alert", END)
     g.add_edge("finalize", END)
     return g.compile()
 
@@ -372,9 +537,11 @@ def main() -> None:
                 "messages": [],
                 "action": Action.SKIPPED_OTHER,
                 "insight": None,
+                "severity": None,
             }
             final_state = _graph.invoke(initial_state)
             action = final_state["action"]
+            severity = final_state.get("severity")
 
             # Count tool calls (visible in the message history) so the log
             # shows when the agent did real work vs. shallow skips.
@@ -390,10 +557,14 @@ def main() -> None:
                 f"{snapshot['score_away']} {snapshot['away_team'] or 'AWAY'}"
             )
             tool_hint = f"  [tools={tool_call_count}]" if tool_call_count else ""
+            # send_alert shows up in the tool count too; we don't want to
+            # double-print severity on top of that. log_insight already
+            # printed the full narrative banner on stdout for ANALYZED events.
+            sev_hint = f"  [{severity}]" if severity else ""
             print(
                 f"[#{event.get('actionNumber', '?'):>3} "
                 f"Q{snapshot['period']} {snapshot['clock']:>5}]  "
-                f"{score_str:<22}  {desc:<55}  → {action}{tool_hint}",
+                f"{score_str:<22}  {desc:<55}  → {action}{sev_hint}{tool_hint}",
                 flush=True,
             )
 

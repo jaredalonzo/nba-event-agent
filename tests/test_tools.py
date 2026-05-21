@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.tools import _stats_cache, analyze_momentum, get_player_stats
+from src.tools import _stats_cache, analyze_momentum, get_player_stats, send_alert
 
 
 @pytest.fixture(autouse=True)
@@ -228,3 +228,50 @@ class TestAnalyzeMomentum:
         result = analyze_momentum.invoke({"state": {}})
         assert "summary" in result
         assert result["plays"] == []
+
+
+# --- send_alert ------------------------------------------------------------
+
+
+class TestSendAlert:
+    def test_delegates_to_log_insight_with_event_from_state(self) -> None:
+        # send_alert is the persistence side-effect; it should pull `event`
+        # from the injected state and forward to log_insight.
+        with patch("src.tools.log_insight") as mock_log:
+            mock_log.return_value = {"severity": "critical"}
+            result = send_alert.invoke(
+                {
+                    "insight": "LeBron tied it at 89.",
+                    "severity": "critical",
+                    "state": {
+                        "event": {
+                            "actionNumber": 412,
+                            "description": "James Driving Layup",
+                        }
+                    },
+                }
+            )
+
+        mock_log.assert_called_once()
+        args, _ = mock_log.call_args
+        assert args[0] == "LeBron tied it at 89."
+        assert args[1] == "critical"
+        assert args[2]["actionNumber"] == 412
+        assert result == {"persisted": True, "severity": "critical"}
+
+    def test_missing_event_in_state_doesnt_crash(self) -> None:
+        # Defensive: if state somehow lacks 'event', the tool still calls
+        # log_insight with an empty dict rather than KeyError-ing.
+        with patch("src.tools.log_insight") as mock_log:
+            mock_log.return_value = {"severity": "notable"}
+            result = send_alert.invoke(
+                {
+                    "insight": "fallback insight",
+                    "severity": "notable",
+                    "state": {},
+                }
+            )
+
+        args, _ = mock_log.call_args
+        assert args[2] == {}
+        assert result["persisted"] is True

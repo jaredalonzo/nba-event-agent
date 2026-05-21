@@ -37,6 +37,8 @@ class AgentState(TypedDict):
                       so node return values append rather than overwrite.
         action:       What the agent decided. Set by the graph as it runs.
         insight:      Final generated narrative, if any (None on skip).
+        severity:     Severity assigned to the insight: routine / notable /
+                      critical. None on skip paths.
     """
 
     event: dict
@@ -44,3 +46,4 @@ class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     action: Action
     insight: str | None
+    severity: str | None

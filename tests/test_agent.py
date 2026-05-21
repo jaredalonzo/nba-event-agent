@@ -7,6 +7,8 @@ Covers:
     - _parse_action_from_text (pure function)
     - route_after_classify (pure function)
     - finalize node (pure function)
+    - _parse_narrator_response (pure function)
+    - generate_insight node (LLM mocked)
 
 We don't unit-test classify_event itself because patching the bound LLM
 (_llm_with_tools) cleanly is awkward, and the graph wiring is covered by
@@ -16,13 +18,18 @@ testable logic lives.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from src.agent import (
     GameContextTracker,
     _parse_action_from_text,
+    _parse_narrator_response,
+    _summarize_tool_results,
     finalize,
+    generate_insight,
     parse_clock,
     route_after_classify,
 )
@@ -257,6 +264,7 @@ def make_state(**overrides) -> dict:
         "messages": [],
         "action": Action.SKIPPED_OTHER,
         "insight": None,
+        "severity": None,
     }
     base.update(overrides)
     return base
@@ -328,8 +336,26 @@ class TestRouteAfterClassify:
         state = make_state(messages=[msg])
         assert route_after_classify(state) == "call_tools"
 
-    def test_plain_text_routes_to_finalize(self) -> None:
+    def test_analyze_prefix_routes_to_generate_insight(self) -> None:
+        # ANALYZE: is the model's signal that the event is notable and we
+        # should generate a narrative.
         msg = AIMessage(content="ANALYZE: notable late-game play")
+        state = make_state(messages=[msg])
+        assert route_after_classify(state) == "generate_insight"
+
+    def test_ready_prefix_also_routes_to_generate_insight(self) -> None:
+        # READY: is accepted as an alias for ANALYZE (forgiving parsing).
+        msg = AIMessage(content="READY: late-game scoring run")
+        state = make_state(messages=[msg])
+        assert route_after_classify(state) == "generate_insight"
+
+    def test_skip_routine_routes_to_finalize(self) -> None:
+        msg = AIMessage(content="SKIP_ROUTINE: substitution")
+        state = make_state(messages=[msg])
+        assert route_after_classify(state) == "finalize"
+
+    def test_skip_early_routes_to_finalize(self) -> None:
+        msg = AIMessage(content="SKIP_EARLY: Q1 free throw")
         state = make_state(messages=[msg])
         assert route_after_classify(state) == "finalize"
 
@@ -343,6 +369,12 @@ class TestRouteAfterClassify:
         # Defensive: if somehow the last message isn't an AIMessage, don't
         # try to route to call_tools.
         state = make_state(messages=[HumanMessage(content="just user")])
+        assert route_after_classify(state) == "finalize"
+
+    def test_unparseable_text_routes_to_finalize(self) -> None:
+        # Garbage from the model shouldn't accidentally trigger the analyze path.
+        msg = AIMessage(content="I'm not sure what to do here")
+        state = make_state(messages=[msg])
         assert route_after_classify(state) == "finalize"
 
 
@@ -364,3 +396,164 @@ class TestFinalize:
         state = make_state(messages=[AIMessage(content="hmm not sure")])
         result = finalize(state)
         assert result == {"action": Action.SKIPPED_OTHER}
+
+
+# --- _parse_narrator_response ----------------------------------------------
+
+
+class TestParseNarratorResponse:
+    def test_canonical_format(self) -> None:
+        text = (
+            "SEVERITY: critical\n"
+            "INSIGHT: LeBron James just tied Game 7 at 89 with a driving layup."
+        )
+        severity, insight = _parse_narrator_response(text)
+        assert severity == "critical"
+        assert "LeBron" in insight
+        assert insight.endswith("layup.")
+
+    def test_severity_case_insensitive(self) -> None:
+        # Narrator may return upper or mixed case for the severity value.
+        severity, _ = _parse_narrator_response("SEVERITY: Notable\nINSIGHT: foo")
+        assert severity == "notable"
+
+    def test_multiline_insight_is_joined(self) -> None:
+        # Narrator may wrap the narrative across multiple lines.
+        text = (
+            "SEVERITY: notable\n"
+            "INSIGHT: First sentence here.\n"
+            "Second sentence continues.\n"
+            "Third sentence wraps it."
+        )
+        _, insight = _parse_narrator_response(text)
+        assert "First sentence" in insight
+        assert "Second sentence" in insight
+        assert "Third sentence" in insight
+
+    def test_unparseable_falls_back_to_raw_text(self) -> None:
+        # If the narrator ignores the format, we still want SOMETHING in the
+        # insight rather than dropping the work entirely.
+        severity, insight = _parse_narrator_response("Just a raw sentence.")
+        assert severity == "notable"  # default
+        assert insight == "Just a raw sentence."
+
+    def test_missing_severity_defaults_to_notable(self) -> None:
+        _, insight = _parse_narrator_response("INSIGHT: only the insight line")
+        assert "only the insight line" in insight
+        severity, _ = _parse_narrator_response("INSIGHT: only the insight line")
+        assert severity == "notable"
+
+    def test_empty_string(self) -> None:
+        severity, insight = _parse_narrator_response("")
+        assert severity == "notable"
+        assert insight == ""
+
+
+# --- _summarize_tool_results -----------------------------------------------
+
+
+class TestSummarizeToolResults:
+    def test_no_tool_messages_returns_empty(self) -> None:
+        assert _summarize_tool_results([]) == ""
+        assert _summarize_tool_results([AIMessage(content="hi")]) == ""
+
+    def test_includes_tool_name_and_content(self) -> None:
+        messages = [
+            ToolMessage(
+                content='{"points": 27}', name="get_player_stats", tool_call_id="t1"
+            ),
+            ToolMessage(
+                content='{"summary": "GSW on a run"}',
+                name="analyze_momentum",
+                tool_call_id="t2",
+            ),
+        ]
+        result = _summarize_tool_results(messages)
+        assert "get_player_stats" in result
+        assert "analyze_momentum" in result
+        assert "points" in result
+        assert "GSW on a run" in result
+
+
+# --- generate_insight node -------------------------------------------------
+
+
+class TestGenerateInsight:
+    @patch("src.agent._narrator")
+    def test_returns_insight_severity_and_action(
+        self, mock_narrator: MagicMock
+    ) -> None:
+        mock_narrator.invoke.return_value = AIMessage(
+            content="SEVERITY: critical\nINSIGHT: LeBron ties it at 89."
+        )
+
+        state = make_state(
+            event={
+                "actionNumber": 412,
+                "description": "James Driving Layup",
+                "playerName": "LeBron James",
+            },
+            game_context={
+                "period": 4,
+                "clock": "1:50",
+                "score_home": 89,
+                "score_away": 89,
+                "home_team": "GSW",
+                "away_team": "CLE",
+            },
+        )
+
+        result = generate_insight(state)
+
+        assert result["action"] == Action.ANALYZED
+        assert result["severity"] == "critical"
+        assert "LeBron" in result["insight"]
+
+    @patch("src.agent._narrator")
+    def test_emits_send_alert_tool_call(self, mock_narrator: MagicMock) -> None:
+        # The graph relies on generate_insight returning an AIMessage with a
+        # send_alert tool_call so the downstream ToolNode can persist.
+        mock_narrator.invoke.return_value = AIMessage(
+            content="SEVERITY: notable\nINSIGHT: A solid run by Cleveland."
+        )
+        state = make_state()
+
+        result = generate_insight(state)
+
+        msgs = result["messages"]
+        assert len(msgs) == 1
+        ai = msgs[0]
+        assert isinstance(ai, AIMessage)
+        assert ai.tool_calls
+        tc = ai.tool_calls[0]
+        assert tc["name"] == "send_alert"
+        assert tc["args"]["severity"] == "notable"
+        assert "Cleveland" in tc["args"]["insight"]
+        assert tc.get("id"), "tool_call must have an id for ToolNode matching"
+
+    @patch("src.agent._narrator")
+    def test_passes_tool_results_to_narrator(
+        self, mock_narrator: MagicMock
+    ) -> None:
+        # When the classifier gathered context via tools, generate_insight
+        # should fold those tool results into the narrator's user prompt.
+        mock_narrator.invoke.return_value = AIMessage(
+            content="SEVERITY: notable\nINSIGHT: stub"
+        )
+        state = make_state(
+            messages=[
+                ToolMessage(
+                    content='{"points": 27, "rebounds": 11}',
+                    name="get_player_stats",
+                    tool_call_id="t1",
+                ),
+            ]
+        )
+
+        generate_insight(state)
+
+        # Inspect the user message that was passed to the narrator.
+        sent_messages = mock_narrator.invoke.call_args[0][0]
+        user_content = sent_messages[1].content
+        assert "27" in user_content
+        assert "get_player_stats" in user_content

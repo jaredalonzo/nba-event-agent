@@ -26,6 +26,8 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 from nba_api.stats.endpoints import boxscoretraditionalv3
 
+from src.output import log_insight
+
 
 # Module-level cache: (game_id, player_id) -> stats dict. The demo replays a
 # single historical game, so stats are static and we never need to refetch.
@@ -157,6 +159,35 @@ def analyze_momentum(state: Annotated[dict, InjectedState]) -> dict:
     }
 
 
-# Tools registered with the LangGraph ToolNode in agent.py. Order matters only
-# for documentation / introspection — the LLM sees them by name and description.
+@tool
+def send_alert(
+    insight: str,
+    severity: str,
+    state: Annotated[dict, InjectedState],
+) -> dict:
+    """Persist a generated insight to stdout and ``data/insights.jsonl``.
+
+    This is the terminal side-effect of the analyze branch. The
+    ``generate_insight`` node produces the narrative + severity and emits a
+    synthetic tool call to this function; ``ToolNode`` then executes it.
+
+    Args:
+        insight: The 2–3 sentence narrative produced by ``generate_insight``.
+        severity: One of ``routine`` / ``notable`` / ``critical``.
+        state: Injected automatically; we pull ``event`` from it so the
+            persisted record can reference the originating play.
+
+    Returns:
+        A small ack dict so the graph has a deterministic tool result.
+    """
+    event = state.get("event", {}) if isinstance(state, dict) else {}
+    record = log_insight(insight, severity, event)
+    return {"persisted": True, "severity": record["severity"]}
+
+
+# Tools the *classifier* binds to. send_alert is intentionally excluded — it
+# is invoked by the graph after generate_insight, not chosen by the classifier.
 AGENT_TOOLS = [get_player_stats, analyze_momentum]
+
+# Tools the graph wires through a dedicated ToolNode after generate_insight.
+PERSIST_TOOLS = [send_alert]
