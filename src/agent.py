@@ -529,6 +529,12 @@ def main() -> None:
     consumer.subscribe([TOPIC])
 
     tracker = GameContextTracker()
+    # PlayByPlayV3 emits two events per (gameId, actionNumber) for plays with
+    # both an offensive and defensive actor (turnover/steal, blocked shot, etc).
+    # Tracker.update still folds both halves so foul counts and scoring stay
+    # accurate, but the graph is invoked only for the first half so we don't
+    # produce two contradictory insights for one moment.
+    seen_pairs: set[tuple[str, int]] = set()
     processed = 0
 
     try:
@@ -543,50 +549,12 @@ def main() -> None:
                 continue
 
             event = json.loads(msg.value())
-            snapshot = tracker.update(event)
             processed += 1
-
-            # Invoke the graph. classify_event may call tools (looping back
-            # through call_tools) before finalize sets state.action.
-            initial_state: AgentState = {
-                "event": event,
-                "game_context": snapshot,
-                "messages": [],
-                "action": Action.SKIPPED_OTHER,
-                "insight": None,
-                "severity": None,
-            }
-            final_state = _graph.invoke(initial_state)
-            action = final_state["action"]
-            severity = final_state.get("severity")
-
-            # Count tool calls (visible in the message history) so the log
-            # shows when the agent did real work vs. shallow skips.
-            tool_call_count = sum(
-                len(getattr(m, "tool_calls", []) or [])
-                for m in final_state.get("messages", [])
-                if isinstance(m, AIMessage)
-            )
-
-            desc = event.get("description") or "(no description)"
-            score_str = (
-                f"{snapshot['home_team'] or 'HOME'} {snapshot['score_home']} - "
-                f"{snapshot['score_away']} {snapshot['away_team'] or 'AWAY'}"
-            )
-            tool_hint = f"  [tools={tool_call_count}]" if tool_call_count else ""
-            # send_alert shows up in the tool count too; we don't want to
-            # double-print severity on top of that. log_insight already
-            # printed the full narrative banner on stdout for ANALYZED events.
-            sev_hint = f"  [{severity}]" if severity else ""
-            print(
-                f"[#{event.get('actionNumber', '?'):>3} "
-                f"Q{snapshot['period']} {snapshot['clock']:>5}]  "
-                f"{score_str:<22}  {desc:<55}  → {action}{sev_hint}{tool_hint}",
-                flush=True,
-            )
+            _process_event(event, tracker, seen_pairs)
 
             # Every 50 events, dump the top 3 foul counts for color.
             if processed % 50 == 0:
+                snapshot = tracker.snapshot()
                 top_fouls = sorted(
                     snapshot["player_fouls"].items(), key=lambda kv: -kv[1]
                 )[:3]
@@ -598,6 +566,65 @@ def main() -> None:
     finally:
         consumer.close()
         print(f"\n[agent] consumed {processed} events. exiting.", flush=True)
+
+
+def _process_event(
+    event: dict,
+    tracker: GameContextTracker,
+    seen_pairs: set[tuple[str, int]],
+) -> None:
+    """Fold one event into the tracker, then invoke the graph unless deduped.
+
+    Extracted so the dedup logic is testable without spinning up Kafka.
+    """
+    snapshot = tracker.update(event)
+
+    pair_key = (event.get("gameId"), event.get("actionNumber"))
+    if pair_key in seen_pairs:
+        # Same (gameId, actionNumber) as a prior event — second half of a
+        # paired play (e.g. turnover + steal). Tracker already updated above;
+        # skip the graph invocation to avoid a second contradictory insight.
+        print(
+            f"[#{event.get('actionNumber', '?'):>3} "
+            f"Q{snapshot['period']} {snapshot['clock']:>5}]  "
+            f"(dup actionNumber, graph skipped)  "
+            f"{event.get('description') or '(no description)'}",
+            flush=True,
+        )
+        return
+    seen_pairs.add(pair_key)
+
+    initial_state: AgentState = {
+        "event": event,
+        "game_context": snapshot,
+        "messages": [],
+        "action": Action.SKIPPED_OTHER,
+        "insight": None,
+        "severity": None,
+    }
+    final_state = _graph.invoke(initial_state)
+    action = final_state["action"]
+    severity = final_state.get("severity")
+
+    tool_call_count = sum(
+        len(getattr(m, "tool_calls", []) or [])
+        for m in final_state.get("messages", [])
+        if isinstance(m, AIMessage)
+    )
+
+    desc = event.get("description") or "(no description)"
+    score_str = (
+        f"{snapshot['home_team'] or 'HOME'} {snapshot['score_home']} - "
+        f"{snapshot['score_away']} {snapshot['away_team'] or 'AWAY'}"
+    )
+    tool_hint = f"  [tools={tool_call_count}]" if tool_call_count else ""
+    sev_hint = f"  [{severity}]" if severity else ""
+    print(
+        f"[#{event.get('actionNumber', '?'):>3} "
+        f"Q{snapshot['period']} {snapshot['clock']:>5}]  "
+        f"{score_str:<22}  {desc:<55}  → {action}{sev_hint}{tool_hint}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
