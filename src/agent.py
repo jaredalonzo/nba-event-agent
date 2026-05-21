@@ -312,10 +312,27 @@ Voice guidance:
 - Tie the moment to the game situation (lead, quarter, time remaining).
 - No play-by-play recitation — interpret the moment.
 
-Also assign a severity:
-- "critical" — game-deciding moments, late-Q4 lead changes, OT, milestones reached.
-- "notable" — momentum shifts, foul trouble for a star, sustained runs.
-- "routine" — should rarely fire from this node; default to "notable" if unsure.
+Also assign a severity. Be disciplined here — if every play is "critical",
+the label loses all meaning. Reserve the top bucket and default downward.
+
+- "critical" — RARE. Only for plays that decide the game's outcome: a go-ahead
+  or game-tying basket inside the final 30 seconds of a one-possession game,
+  a buzzer-beater, an OT-winning shot, a player reaching a career or NBA
+  record, an ejection of a star, or an injury that visibly changes the game.
+  If you can imagine the game continuing normally after this play, it is NOT
+  critical.
+- "notable" — DEFAULT for any moment worth narrating: momentum runs, foul
+  trouble for a star, lead changes outside the final minute, milestone
+  approaches (e.g., player at 18 pts heading toward 20), big individual
+  performances, key defensive stops mid-quarter. When in doubt, choose this.
+- "routine" — for moments that, in hindsight, won't make the highlight reel
+  — a made layup in a 12-point game, a non-clutch free throw, an early-quarter
+  bucket that doesn't shift momentum. Use this when the classifier flagged
+  the play but the gathered context shows it's less notable than it looked.
+
+Target distribution across a typical game: roughly 10% critical, 60% notable,
+30% routine. If you find yourself reaching for "critical" more than once or
+twice per quarter, you're miscalibrated — step down to "notable".
 
 Respond in EXACTLY this format, no preamble:
 
