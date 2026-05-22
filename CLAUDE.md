@@ -16,7 +16,9 @@ Simulated Play-by-Play (nba_api) → Kafka Producer → Kafka Topic → LangGrap
 
 ### Components
 
-- **Producer** (`producer.py`): Fetches historical play-by-play data from `nba_api` and publishes events to a Kafka topic, simulating a live stream with a configurable delay between events.
+- **Producer — historical** (`producer.py`): Fetches a completed game's PBP from `nba_api.stats.endpoints.PlayByPlayV3`, publishes to Kafka with a configurable delay to simulate streaming.
+- **Producer — live** (`producer_live.py`): Polls the NBA's live JSON CDN via `nba_live_client.py` and publishes new plays as they appear. Auto-discovers an in-progress game from today's scoreboard, or streams a specific `NBA_GAME_ID` if set.
+- **Live client** (`nba_live_client.py`): Thin `requests`-based wrapper around `cdn.nba.com/static/json/liveData/{scoreboard,playbyplay}`. Bypasses `nba_api.live` (whose default headers are now blocked by NBA's CDN).
 - **Consumer + Agent** (`agent.py`): Kafka consumer that feeds each event into the LangGraph agent. The agent reasons over the event and decides whether to act.
 - **Tools** (`tools.py`): Four tools the agent can call.
 - **State** (`state.py`): Typed state schema passed through the LangGraph graph.
@@ -33,7 +35,9 @@ nba-agent/
 ├── requirements.txt
 ├── .env.example              # template; copy to .env and fill in (gitignored)
 ├── src/
-│   ├── producer.py           # Fetches nba_api data, publishes to Kafka
+│   ├── producer.py           # Historical: nba_api PlayByPlayV3 → Kafka (with delay)
+│   ├── producer_live.py      # Live: cdn.nba.com poll → Kafka (as plays happen)
+│   ├── nba_live_client.py    # Thin requests wrapper for the live CDN endpoints
 │   ├── agent.py              # LangGraph graph definition + Kafka consumer loop
 │   ├── state.py              # AgentState TypedDict
 │   ├── tools.py              # get_player_stats, analyze_momentum, generate_insight, send_alert
@@ -164,11 +168,25 @@ Without these, the second run of the agent will appear to do nothing — the gro
 
 ## Producer Behavior
 
-- Fetches play-by-play for a specific historical game via `nba_api.stats.endpoints.playbyplayv3.PlayByPlayV3` (the older `PlayByPlay` and `PlayByPlayV2` endpoints are deprecated — stats.nba.com returns empty JSON for them)
-- Recommended game: 2016 NBA Finals Game 7 (GameID: `0041500407`) — high density of notable events
+Two producers, same Kafka topic, agent doesn't care which one is upstream.
+
+### Historical (`producer.py`)
+
+- Fetches a specific completed game's PBP via `nba_api.stats.endpoints.playbyplayv3.PlayByPlayV3` (the older `PlayByPlay` and `PlayByPlayV2` endpoints are deprecated — stats.nba.com returns empty JSON for them)
+- Recommended demo games: 2016 NBA Finals Game 7 (`0041500407`) or 2025 ECF Game 1 (`0042500301`) — both have high density of notable events
 - Serializes each play as JSON, publishes to `nba.plays`
-- Configurable delay between events (default: 0.5s) to simulate live stream
-- Include a `simulated_timestamp` field so the agent knows event ordering
+- Configurable artificial delay (`PRODUCER_DELAY_SECONDS`, default 0.5s) so the agent appears to see plays "live"
+
+### Live (`producer_live.py`)
+
+- Polls `cdn.nba.com/static/json/liveData/playbyplay/playbyplay_<gameId>.json` every `LIVE_POLL_SECONDS` (default 5s) via `src/nba_live_client.py`
+- Bypasses `nba_api.live` because its default headers are now blocked by NBA's CDN (returns 403). Hits the JSON URLs directly with browser-like headers (UA + Origin + Referer)
+- Dedups new actions by `actionNumber` set, publishes only new plays
+- Two game-selection modes:
+  - Explicit: `NBA_GAME_ID` set → stream that game (must currently be in progress)
+  - Auto: `NBA_GAME_ID` empty → auto-discover the first in-progress game on today's slate from the scoreboard endpoint
+- Injects two fields the live endpoint doesn't ship but the agent expects: `gameId` (on the parent in the live response) and `location` ("h"/"v", derived from `teamId` vs `homeTeam.teamId`)
+- Exits cleanly on scoreboard `gameStatus=3` (game final) or SIGINT/SIGTERM
 
 ---
 
@@ -218,7 +236,10 @@ python -m src.producer
 
 ## Future Extensions (Phase 2)
 
-- Swap simulated data for a live WebSocket feed
+- ~~Swap simulated data for a live WebSocket feed~~ — done as polling against
+  `cdn.nba.com/static/json/liveData/*`. The NBA's CDN doesn't offer push, but a
+  5s poll gives ~10-30s end-to-end latency, which is fine for the demo. See
+  `src/producer_live.py`.
 - Add an MCP server tool (`get_player_profile`) to demonstrate MCP + LangGraph integration
 - Add a LangSmith tracing integration for observability
 - Expose insights via a simple FastAPI endpoint

@@ -138,11 +138,24 @@ docker compose up -d
 # Terminal 2: start the agent (consumer)
 python -m src.agent
 
-# Terminal 3: start the producer (in another terminal so you can watch both)
-python -m src.producer
+# Terminal 3: start a producer (historical OR live — see below)
+python -m src.producer       # historical replay
+# python -m src.producer_live  # live polling
 ```
 
-The producer streams 467 plays from Game 7 at a configurable delay (`PRODUCER_DELAY_SECONDS`, default 0.5s). The agent prints classification decisions in real time and writes notable insights to `data/insights.jsonl`.
+The agent prints classification decisions in real time and writes notable insights to `data/insights.jsonl`.
+
+#### Two producer modes
+
+| | `src/producer.py` (historical) | `src/producer_live.py` (live) |
+|---|---|---|
+| **Data source** | `nba_api.stats.endpoints.PlayByPlayV3` | `cdn.nba.com/static/json/liveData/*` |
+| **Game selection** | Set `NBA_GAME_ID` to any completed game | If `NBA_GAME_ID` is set: stream that game (must be in progress). If unset: auto-discover the first in-progress game on today's slate |
+| **Pacing** | Configurable artificial delay (`PRODUCER_DELAY_SECONDS`) | Poll interval (`LIVE_POLL_SECONDS`, default 5s) — dictated by the game |
+| **Duration** | A few minutes (467 events × 0.5s) | A few hours (real game length) |
+| **Available when** | Any time | Only during the NBA season, when a game is actually on |
+
+The historical producer is the demo path — works offline, reproducible. The live producer is the real-event-driven version — same agent, same Kafka, same insights pipeline; just a different source of truth.
 
 ### Re-running cleanly
 
