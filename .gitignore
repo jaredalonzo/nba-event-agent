@@ -19,3 +19,6 @@ data/*.jsonl
 .DS_Store
 .idea/
 .vscode/
+
+# Claude Code worktrees (spawned for parallel agent runs)
+.claude/
