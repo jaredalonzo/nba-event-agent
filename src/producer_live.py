@@ -234,7 +234,6 @@ def stream_game(
 
         time.sleep(poll_seconds)
 
-    producer.flush(timeout=10)
     return published
 
 
