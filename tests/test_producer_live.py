@@ -368,3 +368,63 @@ class TestStreamGame:
         adapted = _json.loads(payload)
         assert adapted["gameId"] == "0042500302"
         assert adapted["location"] in ("h", "v")
+
+    @patch("src.producer_live.time.sleep")
+    @patch("src.producer_live.fetch_playbyplay")
+    @patch("src.producer_live.fetch_scoreboard")
+    def test_failure_budget_exits_after_n_consecutive_failures(
+        self,
+        mock_scoreboard: MagicMock,
+        mock_pbp: MagicMock,
+        mock_sleep: MagicMock,
+    ) -> None:
+        # 60 consecutive pbp failures should cause SystemExit(1). Scoreboard
+        # succeeds throughout so the only source of failures is pbp.
+        mock_scoreboard.return_value = [_game(status=2)]
+        mock_pbp.side_effect = [LiveClientError("network down")] * 60
+        producer = MagicMock()
+        with pytest.raises(SystemExit) as exc_info:
+            live.stream_game(producer, _game(), poll_seconds=0)
+        assert exc_info.value.code == 1
+        # All 60 pbp attempts consumed.
+        assert mock_pbp.call_count == 60
+
+    @patch("src.producer_live.time.sleep")
+    @patch("src.producer_live.fetch_playbyplay")
+    @patch("src.producer_live.fetch_scoreboard")
+    def test_backoff_resets_on_successful_poll(
+        self,
+        mock_scoreboard: MagicMock,
+        mock_pbp: MagicMock,
+        mock_sleep: MagicMock,
+    ) -> None:
+        # Pattern: fail, fail, success, fail, success+final.
+        # After the first success the counter resets, so the fourth call's
+        # backoff is poll_seconds * 2^0 = poll_seconds (not still ramping).
+        mock_scoreboard.side_effect = [
+            [_game(status=2)],
+            [_game(status=2)],
+            [_game(status=2)],
+            [_game(status=2)],
+            [_game(status=3)],
+        ]
+        mock_pbp.side_effect = [
+            LiveClientError("blip 1"),
+            LiveClientError("blip 2"),
+            _pbp([1]),
+            LiveClientError("blip 3"),
+            _pbp([1, 2]),
+        ]
+        producer = MagicMock()
+        # Use poll_seconds=1 so backoff numbers are easy to read.
+        total = live.stream_game(producer, _game(), poll_seconds=1)
+        # 2 unique actions published across the two successful pbp cycles.
+        assert total == 2
+        # Sleeps in order:
+        #   cycle 1 (fail #1): 1 * 2^0 = 1
+        #   cycle 2 (fail #2): 1 * 2^1 = 2
+        #   cycle 3 (success): regular poll_seconds = 1
+        #   cycle 4 (fail #1 after reset): 1 * 2^0 = 1
+        #   cycle 5 (success+final): no sleep — break out of loop before sleep
+        sleep_durations = [c.args[0] for c in mock_sleep.call_args_list]
+        assert sleep_durations == [1, 2, 1, 1]

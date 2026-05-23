@@ -175,12 +175,26 @@ def stream_game(
     seen_action_numbers: set[int] = set()
     published = 0
 
+    # Retry/backoff state. consecutive_failures counts cycles in which any
+    # LiveClientError fired (scoreboard or pbp — one cycle = one count, not
+    # two). LiveGameNotStarted does NOT count as a failure (expected pre-tip).
+    consecutive_failures = 0
+    max_backoff = 60.0
+    failure_budget = 60
+
     while _running:
+        cycle_failed = False
+
         # 1) Check scoreboard for game-end. Cheap (single small JSON file).
         try:
             current_games = fetch_scoreboard()
         except LiveClientError as e:
-            print(f"[producer] scoreboard fetch failed: {e}; retrying", flush=True)
+            cycle_failed = True
+            print(
+                f"[producer] scoreboard fetch failed "
+                f"({consecutive_failures + 1} consecutive): {e}",
+                flush=True,
+            )
             current_games = []
 
         current_status = None
@@ -193,6 +207,7 @@ def stream_game(
         try:
             pbp = fetch_playbyplay(game_id)
         except LiveGameNotStarted:
+            # Pre-tipoff — neither a success nor a failure for the counter.
             print(
                 "[producer] game not started yet; waiting for tipoff",
                 flush=True,
@@ -200,9 +215,39 @@ def stream_game(
             time.sleep(poll_seconds)
             continue
         except LiveClientError as e:
-            print(f"[producer] pbp fetch failed: {e}; retrying", flush=True)
-            time.sleep(poll_seconds)
+            cycle_failed = True
+            consecutive_failures += 1
+            print(
+                f"[producer] pbp fetch failed "
+                f"({consecutive_failures} consecutive): {e}",
+                flush=True,
+            )
+            if consecutive_failures >= failure_budget:
+                print(
+                    f"[producer] exceeded failure budget "
+                    f"({failure_budget} consecutive); exiting",
+                    flush=True,
+                )
+                raise SystemExit(1)
+            # Exponential backoff: poll_seconds * 2^(n-1), capped at max_backoff.
+            backoff = min(poll_seconds * (2 ** (consecutive_failures - 1)), max_backoff)
+            time.sleep(backoff)
             continue
+
+        # pbp succeeded. If scoreboard also succeeded this cycle, reset the
+        # counter. If only scoreboard failed, account for that one failure
+        # (so the budget can still fire on pure-scoreboard outages).
+        if cycle_failed:
+            consecutive_failures += 1
+            if consecutive_failures >= failure_budget:
+                print(
+                    f"[producer] exceeded failure budget "
+                    f"({failure_budget} consecutive); exiting",
+                    flush=True,
+                )
+                raise SystemExit(1)
+        else:
+            consecutive_failures = 0
 
         _, actions = extract_actions(pbp)
         new_actions = [
@@ -234,7 +279,13 @@ def stream_game(
             print("[producer] game final; exiting", flush=True)
             break
 
-        time.sleep(poll_seconds)
+        if cycle_failed:
+            # Scoreboard failed but pbp succeeded — apply backoff anyway
+            # since we're in a degraded state.
+            backoff = min(poll_seconds * (2 ** (consecutive_failures - 1)), max_backoff)
+            time.sleep(backoff)
+        else:
+            time.sleep(poll_seconds)
 
     return published
 
