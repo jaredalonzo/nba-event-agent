@@ -170,6 +170,8 @@ def stream_game(
         flush=True,
     )
 
+    # Per-game state — bounded by ~500 actions for a single game. Resets to
+    # empty when stream_game is called again. Do not reuse this set across games.
     seen_action_numbers: set[int] = set()
     published = 0
 
