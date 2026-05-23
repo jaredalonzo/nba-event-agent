@@ -114,9 +114,9 @@ def adapt_action(
     out = dict(action)
     out["gameId"] = game_id
     team_id = action.get("teamId")
-    if team_id and home_team_id and team_id == home_team_id:
+    if team_id is not None and home_team_id is not None and team_id == home_team_id:
         out["location"] = "h"
-    elif team_id and away_team_id and team_id == away_team_id:
+    elif team_id is not None and away_team_id is not None and team_id == away_team_id:
         out["location"] = "v"
     else:
         out["location"] = ""

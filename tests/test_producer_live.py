@@ -133,6 +133,17 @@ class TestAdaptAction:
         )
         assert out["location"] == ""
 
+    def test_team_id_zero_maps_to_h(self) -> None:
+        # Regression: previous truthiness check treated teamId=0 as missing.
+        # Use `is not None` so a literal 0 still resolves correctly.
+        out = live.adapt_action(
+            {"actionNumber": 1, "teamId": 0},
+            game_id="X",
+            home_team_id=0,
+            away_team_id=1,
+        )
+        assert out["location"] == "h"
+
     def test_does_not_mutate_input(self) -> None:
         original = {"actionNumber": 1, "teamId": 100}
         out = live.adapt_action(
