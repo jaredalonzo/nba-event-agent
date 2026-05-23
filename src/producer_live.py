@@ -217,10 +217,10 @@ def stream_game(
             )
             payload = json.dumps(adapted, default=str).encode("utf-8")
             producer.produce(TOPIC, payload, callback=_delivery_report)
+            producer.poll(0)  # service delivery callbacks promptly
             seen_action_numbers.add(action["actionNumber"])
             published += 1
         if new_actions:
-            producer.poll(0)  # service delivery callbacks
             print(
                 f"[producer] +{len(new_actions)} new plays "
                 f"(total {published})  "
