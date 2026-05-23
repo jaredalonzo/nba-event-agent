@@ -51,6 +51,13 @@ _HEADERS = {
 
 DEFAULT_TIMEOUT = 10.0
 
+# Module-level session for connection pooling. A live game polls every ~5s
+# for 2+ hours; without a Session, every poll opens a fresh TCP+TLS connection
+# (~1,440 handshakes per game). The Session reuses the underlying connection
+# to cdn.nba.com across calls. We deliberately don't pre-attach headers — each
+# call still passes them explicitly so a partial config can't silently lose them.
+_session = requests.Session()
+
 
 class LiveClientError(RuntimeError):
     """Base for client-level failures (network, 4xx/5xx, bad JSON)."""
@@ -67,7 +74,7 @@ class LiveGameNotStarted(LiveClientError):
 def _get_json(url: str, *, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
     """GET ``url`` and decode JSON, raising LiveClientError on any failure."""
     try:
-        resp = requests.get(url, headers=_HEADERS, timeout=timeout)
+        resp = _session.get(url, headers=_HEADERS, timeout=timeout)
     except requests.RequestException as e:
         raise LiveClientError(f"network error fetching {url}: {e}") from e
     if resp.status_code != 200:

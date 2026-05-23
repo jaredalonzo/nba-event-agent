@@ -1,7 +1,8 @@
 """Unit tests for src/nba_live_client.py.
 
-The client is a thin wrapper around two HTTP endpoints. Tests mock
-``requests.get`` directly — we never want a unit test to hit the real CDN.
+The client is a thin wrapper around two HTTP endpoints. Tests mock the
+module-level ``_session.get`` directly — we never want a unit test to hit
+the real CDN.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ def _mock_response(status_code: int = 200, json_payload=None, text: str = "") ->
 
 
 class TestFetchScoreboard:
-    @patch("src.nba_live_client.requests.get")
+    @patch("src.nba_live_client._session.get")
     def test_returns_games_list(self, mock_get: MagicMock) -> None:
         mock_get.return_value = _mock_response(
             200,
@@ -56,38 +57,38 @@ class TestFetchScoreboard:
         assert len(games) == 2
         assert games[0]["gameId"] == "0042500302"
 
-    @patch("src.nba_live_client.requests.get")
+    @patch("src.nba_live_client._session.get")
     def test_empty_slate_returns_empty_list(self, mock_get: MagicMock) -> None:
         mock_get.return_value = _mock_response(
             200, {"scoreboard": {"games": []}}
         )
         assert fetch_scoreboard() == []
 
-    @patch("src.nba_live_client.requests.get")
+    @patch("src.nba_live_client._session.get")
     def test_missing_scoreboard_key_returns_empty(self, mock_get: MagicMock) -> None:
         # Defensive: if NBA changes the response shape, don't crash with KeyError.
         mock_get.return_value = _mock_response(200, {})
         assert fetch_scoreboard() == []
 
-    @patch("src.nba_live_client.requests.get")
+    @patch("src.nba_live_client._session.get")
     def test_403_raises_client_error(self, mock_get: MagicMock) -> None:
         mock_get.return_value = _mock_response(403, text="Access Denied")
         with pytest.raises(LiveClientError, match="HTTP 403"):
             fetch_scoreboard()
 
-    @patch("src.nba_live_client.requests.get")
+    @patch("src.nba_live_client._session.get")
     def test_network_error_raises_client_error(self, mock_get: MagicMock) -> None:
         mock_get.side_effect = requests.ConnectionError("DNS fail")
         with pytest.raises(LiveClientError, match="network error"):
             fetch_scoreboard()
 
-    @patch("src.nba_live_client.requests.get")
+    @patch("src.nba_live_client._session.get")
     def test_non_json_response_raises(self, mock_get: MagicMock) -> None:
         mock_get.return_value = _mock_response(200, text="<html>nope</html>")
         with pytest.raises(LiveClientError, match="non-JSON"):
             fetch_scoreboard()
 
-    @patch("src.nba_live_client.requests.get")
+    @patch("src.nba_live_client._session.get")
     def test_sends_browser_headers(self, mock_get: MagicMock) -> None:
         # The whole reason this module exists is that the CDN rejects the
         # default `requests` UA. Regression-test that we send a real UA.
@@ -103,7 +104,7 @@ class TestFetchScoreboard:
 
 
 class TestFindLiveGame:
-    @patch("src.nba_live_client.requests.get")
+    @patch("src.nba_live_client._session.get")
     def test_returns_first_in_progress(self, mock_get: MagicMock) -> None:
         mock_get.return_value = _mock_response(
             200,
@@ -121,7 +122,7 @@ class TestFindLiveGame:
         assert game is not None
         assert game["gameId"] == "B"
 
-    @patch("src.nba_live_client.requests.get")
+    @patch("src.nba_live_client._session.get")
     def test_returns_none_if_nothing_live(self, mock_get: MagicMock) -> None:
         mock_get.return_value = _mock_response(
             200,
@@ -136,7 +137,7 @@ class TestFindLiveGame:
         )
         assert find_live_game() is None
 
-    @patch("src.nba_live_client.requests.get")
+    @patch("src.nba_live_client._session.get")
     def test_returns_none_on_empty_slate(self, mock_get: MagicMock) -> None:
         mock_get.return_value = _mock_response(
             200, {"scoreboard": {"games": []}}
@@ -148,7 +149,7 @@ class TestFindLiveGame:
 
 
 class TestFetchPlayByPlay:
-    @patch("src.nba_live_client.requests.get")
+    @patch("src.nba_live_client._session.get")
     def test_returns_full_payload(self, mock_get: MagicMock) -> None:
         payload = {
             "meta": {"version": 1},
@@ -164,7 +165,7 @@ class TestFetchPlayByPlay:
         result = fetch_playbyplay("0042500301")
         assert result == payload
 
-    @patch("src.nba_live_client.requests.get")
+    @patch("src.nba_live_client._session.get")
     def test_403_maps_to_game_not_started(self, mock_get: MagicMock) -> None:
         # Critical behavior: the CDN returns 403 for not-yet-started games.
         # We want callers to handle that case distinctly (wait & retry) vs.
@@ -173,14 +174,14 @@ class TestFetchPlayByPlay:
         with pytest.raises(LiveGameNotStarted):
             fetch_playbyplay("0042500302")
 
-    @patch("src.nba_live_client.requests.get")
+    @patch("src.nba_live_client._session.get")
     def test_500_raises_generic_client_error(self, mock_get: MagicMock) -> None:
         mock_get.return_value = _mock_response(500, text="server error")
         with pytest.raises(LiveClientError) as exc:
             fetch_playbyplay("0042500301")
         assert not isinstance(exc.value, LiveGameNotStarted)
 
-    @patch("src.nba_live_client.requests.get")
+    @patch("src.nba_live_client._session.get")
     def test_url_contains_game_id(self, mock_get: MagicMock) -> None:
         mock_get.return_value = _mock_response(
             200, {"game": {"gameId": "0042500301", "actions": []}}
