@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import threading
 import time
 from typing import Any
 
@@ -136,30 +137,24 @@ def _delivery_report(err, msg) -> None:
         print(f"[producer] delivery failed for offset {msg.offset()}: {err}")
 
 
-_running = True
-
-
-def _handle_signal(signum, frame) -> None:
-    """SIGINT/SIGTERM handler: ends the poll loop after the current cycle."""
-    global _running
-    _running = False
-
-
 def stream_game(
     producer: Producer,
     game: dict[str, Any],
     *,
     poll_seconds: float = POLL_SECONDS,
+    stop: threading.Event | None = None,
 ) -> int:
     """Poll the PBP feed for ``game`` and publish new plays.
 
     Returns the total number of plays published. Exits when:
         - the scoreboard reports gameStatus=3 (final), or
-        - a SIGINT/SIGTERM flips ``_running``.
+        - the caller sets the ``stop`` event (e.g. from a signal handler).
 
     Network errors during a single poll are logged and retried on the next
     cycle — we don't crash the whole producer on a transient hiccup.
     """
+    if stop is None:
+        stop = threading.Event()
     game_id = game["gameId"]
     home_id, away_id = extract_team_ids(game)
     home_tri = (game.get("homeTeam") or {}).get("teamTricode") or "HOME"
@@ -182,7 +177,7 @@ def stream_game(
     max_backoff = 60.0
     failure_budget = 60
 
-    while _running:
+    while not stop.is_set():
         cycle_failed = False
 
         # 1) Check scoreboard for game-end. Cheap (single small JSON file).
@@ -291,8 +286,9 @@ def stream_game(
 
 
 def main() -> None:
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
+    stop = threading.Event()
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
 
     try:
         game = resolve_game()
@@ -302,7 +298,7 @@ def main() -> None:
 
     producer = Producer({"bootstrap.servers": BOOTSTRAP_SERVERS})
     try:
-        total = stream_game(producer, game)
+        total = stream_game(producer, game, stop=stop)
     finally:
         producer.flush(timeout=10)
     print(f"[producer] done. {total} plays published to {TOPIC}.", flush=True)

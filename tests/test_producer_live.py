@@ -10,6 +10,7 @@ We mock both the live-client functions (to avoid HTTP) and the Kafka Producer
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -204,11 +205,6 @@ def _pbp(action_numbers: list[int]) -> dict:
 
 
 class TestStreamGame:
-    def setup_method(self) -> None:
-        # Reset the module-level _running flag at the start of each test —
-        # signal-handler tests flip it and we don't want bleed-over.
-        live._running = True
-
     @patch("src.producer_live.time.sleep")
     @patch("src.producer_live.fetch_playbyplay")
     @patch("src.producer_live.fetch_scoreboard")
@@ -320,27 +316,27 @@ class TestStreamGame:
         mock_pbp: MagicMock,
         mock_sleep: MagicMock,
     ) -> None:
-        # Simulate SIGINT mid-stream by flipping _running on the 2nd scoreboard
-        # poll. The current iteration finishes (so PBP gets fetched twice
-        # total), then the while-check fails and we exit. Key behavior under
-        # test: the loop terminates without ever seeing gameStatus=3.
+        # Simulate SIGINT mid-stream by setting the stop event on the 2nd
+        # scoreboard poll. The current iteration finishes (so PBP gets
+        # fetched twice total), then the while-check fails and we exit. Key
+        # behavior under test: the loop terminates without ever seeing
+        # gameStatus=3.
+        stop = threading.Event()
         scoreboard_calls = {"n": 0}
 
         def _flip_on_second_call():
             scoreboard_calls["n"] += 1
             if scoreboard_calls["n"] == 2:
-                live._running = False
+                stop.set()
             return [_game(status=2)]
 
         mock_scoreboard.side_effect = _flip_on_second_call
         mock_pbp.return_value = _pbp([1])
         producer = MagicMock()
-        live.stream_game(producer, _game(), poll_seconds=0)
+        live.stream_game(producer, _game(), poll_seconds=0, stop=stop)
         # Loop terminates in finite time: 2 iterations (signal flipped during
         # iter 2's scoreboard fetch, iter 2 finishes, then while-check exits).
         assert mock_pbp.call_count == 2
-        # restore for other tests
-        live._running = True
 
     @patch("src.producer_live.time.sleep")
     @patch("src.producer_live.fetch_playbyplay")
