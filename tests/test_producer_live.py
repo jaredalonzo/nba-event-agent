@@ -276,7 +276,14 @@ class TestStreamGame:
             _pbp([1, 2]),
         ]
         producer = MagicMock()
-        total = live.stream_game(producer, _game(), poll_seconds=0)
+        # The transient error must be swallowed: stream_game should return
+        # normally and the loop should iterate past the failure.
+        try:
+            total = live.stream_game(producer, _game(), poll_seconds=0)
+        except Exception as e:  # pragma: no cover - this assertion is the point
+            pytest.fail(f"stream_game raised on transient PBP error: {e!r}")
+        # All three PBP polls happened, proving the loop didn't bail on cycle 1.
+        assert mock_pbp.call_count == 3
         assert total == 2  # only the successful poll's actions
         assert producer.produce.call_count == 2
 
