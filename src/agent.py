@@ -39,6 +39,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from src.cost_log import CostTracker
+from src.prefilter import should_skip
 from src.state import Action, AgentState
 from src.tools import AGENT_TOOLS, PERSIST_TOOLS
 
@@ -730,6 +731,22 @@ async def _process_event(
         )
         return
     seen_pairs.add(pair_key)
+
+    # Deterministic pre-filter: substitutions, period markers, early-quarter
+    # timeouts, and blowout free throws in Q1-Q3 are mechanical skips. Catch
+    # them here so we don't spend a classifier call on outcomes the prompt
+    # would already route to SKIP_*. Anything ambiguous returns None and
+    # falls through to the LLM.
+    prefiltered = should_skip(event, snapshot)
+    if prefiltered is not None:
+        print(
+            f"[#{event.get('actionNumber', '?'):>3} "
+            f"Q{snapshot['period']} {snapshot['clock']:>5}]  "
+            f"(prefilter-skip)  "
+            f"{event.get('description') or '(no description)'}  → {prefiltered}",
+            flush=True,
+        )
+        return
 
     initial_state: AgentState = {
         "event": event,
