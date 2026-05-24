@@ -251,12 +251,29 @@ def classify_event(state: AgentState) -> dict:
 
     if not prior:
         messages = [
-            SystemMessage(content=CLASSIFIER_SYSTEM_PROMPT),
+            # Wrap the system prompt as a single cacheable content block.
+            # The cache_control marker tells Anthropic to write the prompt
+            # into the 5-minute ephemeral cache on first use; every later
+            # event within that window (or the next classifier-loop call
+            # for the same event) reads from cache at ~1/10th the input
+            # rate. Note: Sonnet's minimum cacheable prefix is 1,024
+            # tokens. CLASSIFIER_SYSTEM_PROMPT is at the borderline — the
+            # tracker will report cache_create=0 if we slip below it.
+            SystemMessage(
+                content=[
+                    {
+                        "type": "text",
+                        "text": CLASSIFIER_SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            ),
             HumanMessage(content=_build_user_message(event, context)),
         ]
     else:
         # Loop re-entry: replay the full history so the model sees tool results.
-        # System prompt isn't re-sent — it's already in prior[0].
+        # System prompt isn't re-sent here — it's already in prior[0] with its
+        # cache_control marker preserved, so each loop pass reads from cache.
         messages = list(prior)
 
     response = _llm_with_tools.invoke(messages)
@@ -446,7 +463,20 @@ def generate_insight(state: AgentState) -> dict:
     tool_summary = _summarize_tool_results(state.get("messages", []))
 
     messages = [
-        SystemMessage(content=INSIGHT_SYSTEM_PROMPT),
+        # Same caching pattern as classify_event. INSIGHT_SYSTEM_PROMPT is
+        # comfortably above Sonnet's 1,024-token cache minimum, so this is
+        # a near-certain hit on every event after the first within a 5-min
+        # window. Critical for cost — the narrator runs on every analyzed
+        # event and the prompt is the bulk of each call's input.
+        SystemMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": INSIGHT_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        ),
         HumanMessage(
             content=_build_narrator_user_message(event, context, tool_summary)
         ),
