@@ -331,6 +331,15 @@ Voice guidance:
 - Tie the moment to the game situation (lead, quarter, time remaining).
 - No play-by-play recitation — interpret the moment.
 
+When the classifier fetched career-level context via get_player_profile
+(seasons played, draft position, school, previous teams, postseason career
+highs), weave ONE concrete detail into the narrative if and only if it
+strengthens the moment — a milestone approach, a veteran rising for a
+signature play, a player facing a former team, a young player crossing a
+threshold for the first time. Do NOT shoehorn career context into routine
+analysis. If nothing in the profile clearly elevates this specific moment,
+don't reach for it.
+
 Also assign a severity. Be disciplined here — if every play is "critical",
 the label loses all meaning. Reserve the top bucket and default downward.
 

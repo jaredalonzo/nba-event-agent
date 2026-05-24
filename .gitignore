@@ -12,8 +12,8 @@ venv/
 # Environment
 .env
 
-# Output data
-data/*.jsonl
+# Output data + caches (insights.jsonl, player_profiles.json, …)
+data/*.json*
 
 # OS / editor
 .DS_Store
