@@ -38,6 +38,8 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from src.cost_log import CostTracker
+from src.prefilter import should_skip
 from src.state import Action, AgentState
 from src.tools import AGENT_TOOLS, PERSIST_TOOLS
 
@@ -162,9 +164,27 @@ class GameContextTracker:
 
 # --- LangGraph -------------------------------------------------------------
 
-# Model is module-level so we don't re-instantiate per event. The HTTP client
-# inside ChatAnthropic pools connections internally.
-_llm = ChatAnthropic(model="claude-sonnet-4-6", temperature=0)
+# Classifier and narrator are intentionally on different models.
+#
+# Classifier: Claude Haiku 4.5 (~3x cheaper input, ~3x cheaper output than
+# Sonnet 4.6). The classifier's job is routing — yes/no + which tool to
+# call — and Haiku handles that reliably. A side-by-side eval on 8
+# realistic events (scripts/compare_classifier_models.py) showed 87%
+# decision agreement with Sonnet, with the single disagreement being a
+# semantic equivalence (skipped_other vs skipped_early_q on an event
+# both models correctly chose not to analyze).
+#
+# Why this also costs less than Sonnet-with-prompt-caching: classifier
+# input is ~1572 tokens with tool schemas. Sonnet caches that prefix
+# at ~$0.30/MTok on reads, but Haiku's flat $1/MTok input — combined
+# with its much cheaper output ($5 vs $15/MTok) and a slight tendency
+# to write tighter responses — beats Sonnet+cache by ~39% per call.
+#
+# The cache_control marker stays on the classifier system prompt
+# (set in classify_event) even though Haiku silently drops it at this
+# prompt size; it costs nothing and we get the savings automatically
+# if Anthropic later lowers Haiku's cache minimum.
+_llm = ChatAnthropic(model="claude-haiku-4-5", temperature=0)
 
 # Tool-bound classifier is built at startup (see main()), AFTER the MCP
 # subprocess has been spawned and its tools discovered. We can't eagerly bind
@@ -250,12 +270,29 @@ def classify_event(state: AgentState) -> dict:
 
     if not prior:
         messages = [
-            SystemMessage(content=CLASSIFIER_SYSTEM_PROMPT),
+            # Wrap the system prompt as a single cacheable content block.
+            # The cache_control marker tells Anthropic to write the prompt
+            # into the 5-minute ephemeral cache on first use; every later
+            # event within that window (or the next classifier-loop call
+            # for the same event) reads from cache at ~1/10th the input
+            # rate. Note: Sonnet's minimum cacheable prefix is 1,024
+            # tokens. CLASSIFIER_SYSTEM_PROMPT is at the borderline — the
+            # tracker will report cache_create=0 if we slip below it.
+            SystemMessage(
+                content=[
+                    {
+                        "type": "text",
+                        "text": CLASSIFIER_SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            ),
             HumanMessage(content=_build_user_message(event, context)),
         ]
     else:
         # Loop re-entry: replay the full history so the model sees tool results.
-        # System prompt isn't re-sent — it's already in prior[0].
+        # System prompt isn't re-sent here — it's already in prior[0] with its
+        # cache_control marker preserved, so each loop pass reads from cache.
         messages = list(prior)
 
     response = _llm_with_tools.invoke(messages)
@@ -445,7 +482,20 @@ def generate_insight(state: AgentState) -> dict:
     tool_summary = _summarize_tool_results(state.get("messages", []))
 
     messages = [
-        SystemMessage(content=INSIGHT_SYSTEM_PROMPT),
+        # Same caching pattern as classify_event. INSIGHT_SYSTEM_PROMPT is
+        # comfortably above Sonnet's 1,024-token cache minimum, so this is
+        # a near-certain hit on every event after the first within a 5-min
+        # window. Critical for cost — the narrator runs on every analyzed
+        # event and the prompt is the bulk of each call's input.
+        SystemMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": INSIGHT_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        ),
         HumanMessage(
             content=_build_narrator_user_message(event, context, tool_summary)
         ),
@@ -600,6 +650,14 @@ async def main() -> None:
     consumer = build_consumer()
     consumer.subscribe([TOPIC])
 
+    # One tracker per run; attached as a callback on both ChatAnthropic
+    # instances. The handler fires on every .invoke/.ainvoke and records
+    # the four token counters separately, so the per-run summary can split
+    # fresh vs. cached input cost.
+    cost_tracker = CostTracker()
+    _llm.callbacks = [cost_tracker]
+    _narrator.callbacks = [cost_tracker]
+
     mcp_client = _build_mcp_client()
     global _llm_with_tools, _graph
     async with mcp_client.session("nba") as session:
@@ -655,6 +713,15 @@ async def main() -> None:
         finally:
             consumer.close()
             print(f"\n[agent] consumed {processed} events. exiting.", flush=True)
+            # Always emit the cost summary, even on abnormal exit — the run
+            # may have been short, but the tracker still has data worth
+            # reviewing (especially while iterating on prompt changes).
+            print(cost_tracker.format_summary(), flush=True)
+            from pathlib import Path
+            cost_tracker.append_to(
+                Path("data") / "runs.jsonl",
+                extra={"events_processed": processed, "group_id": GROUP_ID},
+            )
 
 
 async def _process_event(
@@ -682,6 +749,22 @@ async def _process_event(
         )
         return
     seen_pairs.add(pair_key)
+
+    # Deterministic pre-filter: substitutions, period markers, early-quarter
+    # timeouts, and blowout free throws in Q1-Q3 are mechanical skips. Catch
+    # them here so we don't spend a classifier call on outcomes the prompt
+    # would already route to SKIP_*. Anything ambiguous returns None and
+    # falls through to the LLM.
+    prefiltered = should_skip(event, snapshot)
+    if prefiltered is not None:
+        print(
+            f"[#{event.get('actionNumber', '?'):>3} "
+            f"Q{snapshot['period']} {snapshot['clock']:>5}]  "
+            f"(prefilter-skip)  "
+            f"{event.get('description') or '(no description)'}  → {prefiltered}",
+            flush=True,
+        )
+        return
 
     initial_state: AgentState = {
         "event": event,
