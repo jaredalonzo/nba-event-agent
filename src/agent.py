@@ -38,6 +38,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from src.cost_log import CostTracker
 from src.state import Action, AgentState
 from src.tools import AGENT_TOOLS, PERSIST_TOOLS
 
@@ -600,6 +601,14 @@ async def main() -> None:
     consumer = build_consumer()
     consumer.subscribe([TOPIC])
 
+    # One tracker per run; attached as a callback on both ChatAnthropic
+    # instances. The handler fires on every .invoke/.ainvoke and records
+    # the four token counters separately, so the per-run summary can split
+    # fresh vs. cached input cost.
+    cost_tracker = CostTracker()
+    _llm.callbacks = [cost_tracker]
+    _narrator.callbacks = [cost_tracker]
+
     mcp_client = _build_mcp_client()
     global _llm_with_tools, _graph
     async with mcp_client.session("nba") as session:
@@ -655,6 +664,15 @@ async def main() -> None:
         finally:
             consumer.close()
             print(f"\n[agent] consumed {processed} events. exiting.", flush=True)
+            # Always emit the cost summary, even on abnormal exit — the run
+            # may have been short, but the tracker still has data worth
+            # reviewing (especially while iterating on prompt changes).
+            print(cost_tracker.format_summary(), flush=True)
+            from pathlib import Path
+            cost_tracker.append_to(
+                Path("data") / "runs.jsonl",
+                extra={"events_processed": processed, "group_id": GROUP_ID},
+            )
 
 
 async def _process_event(
