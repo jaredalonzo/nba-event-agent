@@ -164,9 +164,27 @@ class GameContextTracker:
 
 # --- LangGraph -------------------------------------------------------------
 
-# Model is module-level so we don't re-instantiate per event. The HTTP client
-# inside ChatAnthropic pools connections internally.
-_llm = ChatAnthropic(model="claude-sonnet-4-6", temperature=0)
+# Classifier and narrator are intentionally on different models.
+#
+# Classifier: Claude Haiku 4.5 (~3x cheaper input, ~3x cheaper output than
+# Sonnet 4.6). The classifier's job is routing — yes/no + which tool to
+# call — and Haiku handles that reliably. A side-by-side eval on 8
+# realistic events (scripts/compare_classifier_models.py) showed 87%
+# decision agreement with Sonnet, with the single disagreement being a
+# semantic equivalence (skipped_other vs skipped_early_q on an event
+# both models correctly chose not to analyze).
+#
+# Why this also costs less than Sonnet-with-prompt-caching: classifier
+# input is ~1572 tokens with tool schemas. Sonnet caches that prefix
+# at ~$0.30/MTok on reads, but Haiku's flat $1/MTok input — combined
+# with its much cheaper output ($5 vs $15/MTok) and a slight tendency
+# to write tighter responses — beats Sonnet+cache by ~39% per call.
+#
+# The cache_control marker stays on the classifier system prompt
+# (set in classify_event) even though Haiku silently drops it at this
+# prompt size; it costs nothing and we get the savings automatically
+# if Anthropic later lowers Haiku's cache minimum.
+_llm = ChatAnthropic(model="claude-haiku-4-5", temperature=0)
 
 # Tool-bound classifier is built at startup (see main()), AFTER the MCP
 # subprocess has been spawned and its tools discovered. We can't eagerly bind

@@ -20,6 +20,7 @@ Anthropic pricing page before quoting in any external context.
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +28,18 @@ from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
+
+
+_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
+
+
+def _strip_version_suffix(model_name: str) -> str:
+    """Remove a trailing -YYYYMMDD date suffix from a model name.
+
+    'claude-haiku-4-5-20251001' -> 'claude-haiku-4-5'
+    'claude-sonnet-4-6'         -> 'claude-sonnet-4-6'  (no change)
+    """
+    return _DATE_SUFFIX_RE.sub("", model_name)
 
 # Per-million-token pricing (USD). Sentinel values — update if Anthropic's
 # pricing changes. Keyed by the model_name the API reports back, which is
@@ -145,7 +158,13 @@ class CostTracker(BaseCallbackHandler):
             bucket["output_tokens"] += r.output_tokens
 
         for model, b in per_model.items():
-            prices = _PRICING.get(model)
+            # Anthropic's API returns versioned model names like
+            # 'claude-haiku-4-5-20251001'. Our pricing table is keyed by
+            # the unversioned alias ('claude-haiku-4-5') so prices stay
+            # stable when new versions ship. Strip a trailing -YYYYMMDD
+            # date suffix before looking up.
+            lookup = _strip_version_suffix(model)
+            prices = _PRICING.get(lookup)
             if prices is None:
                 b["cost_usd"] = None
                 b["warning"] = f"no pricing entry for model {model!r}"
