@@ -18,7 +18,8 @@ testable logic lives.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -573,11 +574,14 @@ class TestProcessEventDedup:
     def test_duplicate_action_number_invokes_graph_once(
         self, mock_graph: MagicMock
     ) -> None:
-        mock_graph.invoke.return_value = {
-            "action": Action.SKIPPED_OTHER,
-            "severity": None,
-            "messages": [],
-        }
+        # _graph.ainvoke is async; use AsyncMock so `await` resolves cleanly.
+        mock_graph.ainvoke = AsyncMock(
+            return_value={
+                "action": Action.SKIPPED_OTHER,
+                "severity": None,
+                "messages": [],
+            }
+        )
         tracker = GameContextTracker()
         seen: set = set()
 
@@ -596,12 +600,12 @@ class TestProcessEventDedup:
             actionType="Steal",
         )
 
-        _process_event(offensive, tracker, seen)
-        _process_event(defensive, tracker, seen)
+        asyncio.run(_process_event(offensive, tracker, seen))
+        asyncio.run(_process_event(defensive, tracker, seen))
 
-        assert mock_graph.invoke.call_count == 1
+        assert mock_graph.ainvoke.await_count == 1
         # First call should have seen the offensive event.
-        invoked_state = mock_graph.invoke.call_args_list[0][0][0]
+        invoked_state = mock_graph.ainvoke.await_args_list[0][0][0]
         assert invoked_state["event"]["description"] == "Strus Turnover"
 
     @patch("src.agent._graph")
@@ -610,11 +614,13 @@ class TestProcessEventDedup:
     ) -> None:
         # Even when the graph is deduped, both halves must flow through the
         # tracker so foul counts and scoring stay accurate.
-        mock_graph.invoke.return_value = {
-            "action": Action.SKIPPED_OTHER,
-            "severity": None,
-            "messages": [],
-        }
+        mock_graph.ainvoke = AsyncMock(
+            return_value={
+                "action": Action.SKIPPED_OTHER,
+                "severity": None,
+                "messages": [],
+            }
+        )
         tracker = GameContextTracker()
         seen: set = set()
 
@@ -627,25 +633,27 @@ class TestProcessEventDedup:
             actionNumber=200, personId=222, actionType="Foul"
         )
 
-        _process_event(first, tracker, seen)
-        _process_event(second, tracker, seen)
+        asyncio.run(_process_event(first, tracker, seen))
+        asyncio.run(_process_event(second, tracker, seen))
 
-        assert mock_graph.invoke.call_count == 1
+        assert mock_graph.ainvoke.await_count == 1
         assert tracker.player_fouls == {111: 1, 222: 1}
 
     @patch("src.agent._graph")
     def test_distinct_action_numbers_both_invoke_graph(
         self, mock_graph: MagicMock
     ) -> None:
-        mock_graph.invoke.return_value = {
-            "action": Action.SKIPPED_OTHER,
-            "severity": None,
-            "messages": [],
-        }
+        mock_graph.ainvoke = AsyncMock(
+            return_value={
+                "action": Action.SKIPPED_OTHER,
+                "severity": None,
+                "messages": [],
+            }
+        )
         tracker = GameContextTracker()
         seen: set = set()
 
-        _process_event(make_event(actionNumber=10), tracker, seen)
-        _process_event(make_event(actionNumber=11), tracker, seen)
+        asyncio.run(_process_event(make_event(actionNumber=10), tracker, seen))
+        asyncio.run(_process_event(make_event(actionNumber=11), tracker, seen))
 
-        assert mock_graph.invoke.call_count == 2
+        assert mock_graph.ainvoke.await_count == 2

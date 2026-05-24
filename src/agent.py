@@ -17,9 +17,11 @@ Filled out across milestones:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import signal
+import sys
 import time
 import uuid
 from collections import deque
@@ -30,6 +32,9 @@ from confluent_kafka import Consumer, KafkaError
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.tools import BaseTool
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
@@ -160,7 +165,12 @@ class GameContextTracker:
 # Model is module-level so we don't re-instantiate per event. The HTTP client
 # inside ChatAnthropic pools connections internally.
 _llm = ChatAnthropic(model="claude-sonnet-4-6", temperature=0)
-_llm_with_tools = _llm.bind_tools(AGENT_TOOLS)
+
+# Tool-bound classifier is built at startup (see main()), AFTER the MCP
+# subprocess has been spawned and its tools discovered. We can't eagerly bind
+# AGENT_TOOLS here because the agent would then be missing get_player_profile —
+# the model wouldn't know it exists and would never call it.
+_llm_with_tools: Any = None
 
 # Separate, no-tools client for the narrative pass. A higher temperature gives
 # the ESPN voice a bit of personality without going off the rails.
@@ -183,9 +193,18 @@ SKIP routine events that don't need narrative:
 - Timeouts in early quarters (Q1, Q2)
 - Rebounds, missed shots, or jump balls with no game-state implication
 
-You have two tools available:
-- get_player_stats(player_id, game_id): the player's current box-score line
-- analyze_momentum(): the last 5 scoring plays and the recent momentum picture
+You have three tools available:
+- get_player_stats(player_id, game_id): the player's CURRENT-GAME box-score line
+  (points, rebounds, assists, +/- in this game). Use this when you need to
+  know how the player is performing right now.
+- analyze_momentum(): the last 5 scoring plays and the recent momentum picture.
+- get_player_profile(player_id): CAREER-LEVEL context — bio, draft position,
+  seasons played, school, previous teams, career averages, postseason career
+  highs. Use this sparingly, only when career context would meaningfully
+  enrich the narrative: a player approaching a personal best, a veteran on
+  a signature moment, a former #1 pick rising to the occasion, or a returning
+  player playing against a previous team. Do NOT call it for routine notable
+  plays where current-game stats are enough.
 
 Use tools only when needed. For obviously routine events, skip without
 calling any tools. For potentially notable events, gather just enough context
@@ -311,6 +330,15 @@ Voice guidance:
 - Reference specific numbers when they were fetched (points, momentum, fouls).
 - Tie the moment to the game situation (lead, quarter, time remaining).
 - No play-by-play recitation — interpret the moment.
+
+When the classifier fetched career-level context via get_player_profile
+(seasons played, draft position, school, previous teams, postseason career
+highs), weave ONE concrete detail into the narrative if and only if it
+strengthens the moment — a milestone approach, a veteran rising for a
+signature play, a player facing a former team, a young player crossing a
+threshold for the first time. Do NOT shoehorn career context into routine
+analysis. If nothing in the profile clearly elevates this specific moment,
+don't reach for it.
 
 Also assign a severity. Be disciplined here — if every play is "critical",
 the label loses all meaning. Reserve the top bucket and default downward.
@@ -447,8 +475,12 @@ def generate_insight(state: AgentState) -> dict:
     }
 
 
-def build_graph():
+def build_graph(data_tools: list[BaseTool] | None = None):
     """Compile the LangGraph for the NBA agent.
+
+    The ``data_tools`` arg lets main() pass in AGENT_TOOLS + the MCP-bridged
+    tools discovered at startup. Defaults to AGENT_TOOLS only so the function
+    is still usable in tests and ad-hoc scripts that don't need MCP.
 
     M5 shape::
 
@@ -460,9 +492,10 @@ def build_graph():
                       │
                       └─ SKIP_*  → finalize → END
     """
+    tools = list(data_tools) if data_tools is not None else list(AGENT_TOOLS)
     g = StateGraph(AgentState)
     g.add_node("classify_event", classify_event)
-    g.add_node("call_tools", ToolNode(AGENT_TOOLS))
+    g.add_node("call_tools", ToolNode(tools))
     g.add_node("generate_insight", generate_insight)
     g.add_node("send_alert", ToolNode(PERSIST_TOOLS))
     g.add_node("finalize", finalize)
@@ -484,8 +517,9 @@ def build_graph():
     return g.compile()
 
 
-# Compile once at import time. The graph is stateless across invocations.
-_graph = build_graph()
+# Compiled lazily in main() once MCP tools are available. Stays None until
+# then; tests that need a graph build their own via build_graph() directly.
+_graph: Any = None
 
 
 # --- Kafka consumer --------------------------------------------------------
@@ -508,17 +542,55 @@ def build_consumer() -> Consumer:
     )
 
 
-_running = True
+def _build_mcp_client() -> MultiServerMCPClient:
+    """Construct the MCP client pointed at our local stdio server.
+
+    Factored out so tests can mock it. The server is spawned as a Python
+    subprocess running ``src.mcp_server.server`` over stdio — no port, no
+    second terminal, no extra config to manage.
+    """
+    return MultiServerMCPClient(
+        {
+            "nba": {
+                "command": sys.executable,
+                "args": ["-m", "src.mcp_server.server"],
+                "transport": "stdio",
+            }
+        }
+    )
 
 
-def _handle_signal(signum, frame) -> None:
-    global _running
-    _running = False
+async def main() -> None:
+    """Run the Kafka consumer + LangGraph agent.
 
+    Async because the MCP-bridged tools require an event loop and don't
+    support sync invocation. The consumer itself is a blocking C library
+    (confluent_kafka), so each poll is dispatched to the default thread
+    executor — the event loop stays unblocked and can service tool calls.
 
-def main() -> None:
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
+    Lifecycle:
+        1. Open a persistent stdio session to the MCP subprocess
+           (``async with client.session("nba")``). Re-spawning per call
+           costs ~570ms each; a held session is ~1ms.
+        2. Discover MCP tools and merge into the classifier's tool list.
+        3. Build the graph with the combined toolset.
+        4. Poll Kafka and process events until SIGINT/SIGTERM fires the
+           stop event.
+        5. Exit the ``async with`` to tear down the subprocess cleanly.
+    """
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    # add_signal_handler is the async-safe way to wire SIGINT/SIGTERM. The
+    # old `signal.signal` callback approach doesn't compose with the event
+    # loop and can lose signals fired during awaits.
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:
+            # Windows doesn't support add_signal_handler; fall back to the
+            # classic API. Not a real concern for this project (mac/Linux only),
+            # but keeps the agent importable on other platforms.
+            signal.signal(sig, lambda *_: stop.set())
 
     print(
         f"[agent] consuming {TOPIC} from {BOOTSTRAP_SERVERS} (group={GROUP_ID})",
@@ -528,47 +600,64 @@ def main() -> None:
     consumer = build_consumer()
     consumer.subscribe([TOPIC])
 
-    tracker = GameContextTracker()
-    # PlayByPlayV3 emits two events per (gameId, actionNumber) for plays with
-    # both an offensive and defensive actor (turnover/steal, blocked shot, etc).
-    # Tracker.update still folds both halves so foul counts and scoring stay
-    # accurate, but the graph is invoked only for the first half so we don't
-    # produce two contradictory insights for one moment.
-    seen_pairs: set[tuple[str, int]] = set()
-    processed = 0
+    mcp_client = _build_mcp_client()
+    global _llm_with_tools, _graph
+    async with mcp_client.session("nba") as session:
+        mcp_tools = await load_mcp_tools(session)
+        print(
+            f"[agent] MCP subprocess up — discovered {len(mcp_tools)} tool(s): "
+            f"{[t.name for t in mcp_tools]}",
+            flush=True,
+        )
+        all_data_tools = list(AGENT_TOOLS) + list(mcp_tools)
+        _llm_with_tools = _llm.bind_tools(all_data_tools)
+        _graph = build_graph(all_data_tools)
 
-    try:
-        while _running:
-            msg = consumer.poll(1.0)
-            if msg is None:
-                continue
-            if msg.error():
-                if msg.error().code() == KafkaError._PARTITION_EOF:
+        tracker = GameContextTracker()
+        # PlayByPlayV3 emits two events per (gameId, actionNumber) for plays
+        # with both an offensive and defensive actor (turnover/steal, blocked
+        # shot, etc). Tracker.update still folds both halves so foul counts
+        # and scoring stay accurate, but the graph is invoked only for the
+        # first half so we don't produce two contradictory insights for one
+        # moment.
+        seen_pairs: set[tuple[str, int]] = set()
+        processed = 0
+
+        try:
+            while not stop.is_set():
+                # poll() is a blocking C call; offload to the default
+                # executor so the event loop stays free.
+                msg = await loop.run_in_executor(None, consumer.poll, 1.0)
+                if msg is None:
                     continue
-                print(f"[agent] consumer error: {msg.error()}", flush=True)
-                continue
+                if msg.error():
+                    if msg.error().code() == KafkaError._PARTITION_EOF:
+                        continue
+                    print(f"[agent] consumer error: {msg.error()}", flush=True)
+                    continue
 
-            event = json.loads(msg.value())
-            processed += 1
-            _process_event(event, tracker, seen_pairs)
+                event = json.loads(msg.value())
+                processed += 1
+                await _process_event(event, tracker, seen_pairs)
 
-            # Every 50 events, dump the top 3 foul counts for color.
-            if processed % 50 == 0:
-                snapshot = tracker.snapshot()
-                top_fouls = sorted(
-                    snapshot["player_fouls"].items(), key=lambda kv: -kv[1]
-                )[:3]
-                if top_fouls:
-                    print(
-                        f"   ↳ top foulers (by personId): {top_fouls}", flush=True
-                    )
+                # Every 50 events, dump the top 3 foul counts for color.
+                if processed % 50 == 0:
+                    snapshot = tracker.snapshot()
+                    top_fouls = sorted(
+                        snapshot["player_fouls"].items(), key=lambda kv: -kv[1]
+                    )[:3]
+                    if top_fouls:
+                        print(
+                            f"   ↳ top foulers (by personId): {top_fouls}",
+                            flush=True,
+                        )
 
-    finally:
-        consumer.close()
-        print(f"\n[agent] consumed {processed} events. exiting.", flush=True)
+        finally:
+            consumer.close()
+            print(f"\n[agent] consumed {processed} events. exiting.", flush=True)
 
 
-def _process_event(
+async def _process_event(
     event: dict,
     tracker: GameContextTracker,
     seen_pairs: set[tuple[str, int]],
@@ -602,7 +691,7 @@ def _process_event(
         "insight": None,
         "severity": None,
     }
-    final_state = _graph.invoke(initial_state)
+    final_state = await _graph.ainvoke(initial_state)
     action = final_state["action"]
     severity = final_state.get("severity")
 
@@ -628,4 +717,4 @@ def _process_event(
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -23,12 +23,14 @@ Simulated play-by-play (nba_api)
         ↓
    Kafka topic: nba.plays
         ↓
-   Consumer + LangGraph agent
+   Consumer + LangGraph agent ──► MCP subprocess (career profile)
         ↓
    data/insights.jsonl
 ```
 
 The consumer maintains a stateful `GameContextTracker` keyed by game ID — running score, quarter, time, last five scoring plays, per-player foul counts — folded across the event stream. Before each graph invocation, it attaches a fresh snapshot to the agent state. The graph itself is stateless across events.
+
+At startup the agent spawns a separate MCP subprocess that exposes one tool, `get_player_profile`, for career-level context. The classifier sees it alongside the local tools and decides on its own when to reach for it (see [MCP integration](#mcp-integration) below).
 
 ### The agent loop
 
@@ -41,8 +43,8 @@ The consumer maintains a stateful `GameContextTracker` keyed by game ID — runn
    │      ↓        ↓             ↓
    └── call_tools  [END]         generate_insight (node, LLM call)
        (get_player_stats,           ↓
-        analyze_momentum)         send_alert (tool)
-                                    ↓
+        analyze_momentum,         send_alert (tool)
+        get_player_profile)         ↓
                                   [END]
 ```
 
@@ -75,6 +77,7 @@ Routine free throws, substitutions, and early-quarter timeouts are skipped witho
 | Kafka client     | `confluent-kafka` (librdkafka)                          |
 | Kafka runtime    | Confluent Platform 7.5 via Docker Compose               |
 | NBA data         | `nba_api` (`PlayByPlayV3` endpoint)                     |
+| MCP              | `mcp` (FastMCP server) + `langchain-mcp-adapters` bridge |
 | Config           | `python-dotenv`                                         |
 | Types            | `pydantic` v2                                           |
 
@@ -88,13 +91,16 @@ nba-event-agent/
 ├── requirements.txt
 ├── .env.example            # template; copy to .env (gitignored)
 ├── src/
-│   ├── producer.py         # nba_api → Kafka
-│   ├── agent.py            # LangGraph graph + consumer loop
+│   ├── producer.py         # nba_api → Kafka (historical)
+│   ├── producer_live.py    # cdn.nba.com → Kafka (live polling)
+│   ├── nba_live_client.py  # requests wrapper for the live CDN
+│   ├── agent.py            # LangGraph graph + async consumer; spawns MCP server
 │   ├── state.py            # AgentState TypedDict, Action enum
 │   ├── tools.py            # get_player_stats, analyze_momentum, send_alert
-│   └── output.py           # Insight persistence
-├── data/
-│   └── insights.jsonl      # Generated insights
+│   ├── output.py           # Insight persistence
+│   └── mcp_server/
+│       └── server.py       # MCP: get_player_profile (career context)
+├── data/                   # insights.jsonl + player_profiles.json (gitignored)
 └── tests/
 ```
 
@@ -188,12 +194,41 @@ Insights are appended line-by-line to `data/insights.jsonl` and mirrored to stdo
 
 ---
 
+## MCP integration
+
+The agent's career-context tool, `get_player_profile`, lives in a separate process speaking the [Model Context Protocol](https://modelcontextprotocol.io/) over stdio. The agent spawns it at startup and holds the session open for the run:
+
+```python
+mcp_client = MultiServerMCPClient({
+    "nba": {
+        "command": sys.executable,
+        "args": ["-m", "src.mcp_server.server"],
+        "transport": "stdio",
+    }
+})
+
+async with mcp_client.session("nba") as session:
+    mcp_tools = await load_mcp_tools(session)
+    all_tools = AGENT_TOOLS + mcp_tools
+    # bind to the classifier LLM, build the graph, run the consumer loop…
+```
+
+Two things worth flagging:
+
+- **Why MCP for this tool specifically.** The local tools in `src/tools.py` operate on the current game — box-score stats, momentum runs, alerts. `get_player_profile` is a different shape: it pulls career-level data that doesn't change mid-game and is worth caching to disk. Moving it behind MCP keeps that long-lived data fetcher (and its cache) cleanly out of the per-event tool surface, and demonstrates the protocol-level integration as a portfolio piece.
+
+- **Persistent session matters.** A re-spawn-per-call setup runs ~570ms per tool invocation (subprocess startup + handshake). Holding the session open via `client.session("nba")` drops that to ~1ms. The MCP subprocess maintains its own in-memory cache mirroring `data/player_profiles.json`, so repeat lookups for the same player are effectively free.
+
+The MCP-bridged tool is async-only — `langchain-mcp-adapters` wraps it as a LangChain `StructuredTool` without sync support. That's why the agent's `main()` and `_process_event` are `async def` and the graph uses `ainvoke`; the Kafka consumer's blocking `poll` is dispatched to a thread executor so the event loop stays free.
+
+---
+
 ## Roadmap
 
 Beyond the current scope:
 
-- Swap simulated play-by-play for a live WebSocket feed
-- Add an MCP server tool (`get_player_profile`) to demonstrate MCP + LangGraph integration
+- ~~Swap simulated play-by-play for a live WebSocket feed~~ — done as polling against `cdn.nba.com/static/json/liveData/*` (see `src/producer_live.py`)
+- ~~Add an MCP server tool (`get_player_profile`) to demonstrate MCP + LangGraph integration~~ — done
 - LangSmith tracing for observability
 - FastAPI endpoint exposing the insight stream
 

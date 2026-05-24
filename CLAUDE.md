@@ -12,6 +12,8 @@ This project is a portfolio piece demonstrating event-driven agentic architectur
 
 ```
 Simulated Play-by-Play (nba_api) → Kafka Producer → Kafka Topic → LangGraph Agent → Insight Output
+                                                                       │
+                                                                       └─► MCP subprocess (career profile)
 ```
 
 ### Components
@@ -19,8 +21,9 @@ Simulated Play-by-Play (nba_api) → Kafka Producer → Kafka Topic → LangGrap
 - **Producer — historical** (`producer.py`): Fetches a completed game's PBP from `nba_api.stats.endpoints.PlayByPlayV3`, publishes to Kafka with a configurable delay to simulate streaming.
 - **Producer — live** (`producer_live.py`): Polls the NBA's live JSON CDN via `nba_live_client.py` and publishes new plays as they appear. Auto-discovers an in-progress game from today's scoreboard, or streams a specific `NBA_GAME_ID` if set.
 - **Live client** (`nba_live_client.py`): Thin `requests`-based wrapper around `cdn.nba.com/static/json/liveData/{scoreboard,playbyplay}`. Bypasses `nba_api.live` (whose default headers are now blocked by NBA's CDN).
-- **Consumer + Agent** (`agent.py`): Kafka consumer that feeds each event into the LangGraph agent. The agent reasons over the event and decides whether to act.
-- **Tools** (`tools.py`): Four tools the agent can call.
+- **Consumer + Agent** (`agent.py`): Async Kafka consumer that feeds each event into the LangGraph agent. The agent reasons over the event and decides whether to act. Spawns the MCP subprocess at startup and holds the stdio session open for the run.
+- **Tools** (`tools.py`): Local tools (`get_player_stats`, `analyze_momentum`, `send_alert`).
+- **MCP server** (`mcp_server/server.py`): Separate stdio subprocess exposing one tool — `get_player_profile` — for career-level player context (bio, draft, school, previous teams, career averages, postseason career highs). Persistent disk cache at `data/player_profiles.json` so the per-player nba_api fetch happens once, ever.
 - **State** (`state.py`): Typed state schema passed through the LangGraph graph.
 - **Output** (`output.py`): Handles insight logging (console + JSON file).
 
@@ -38,12 +41,15 @@ nba-agent/
 │   ├── producer.py           # Historical: nba_api PlayByPlayV3 → Kafka (with delay)
 │   ├── producer_live.py      # Live: cdn.nba.com poll → Kafka (as plays happen)
 │   ├── nba_live_client.py    # Thin requests wrapper for the live CDN endpoints
-│   ├── agent.py              # LangGraph graph definition + Kafka consumer loop
+│   ├── agent.py              # LangGraph graph + async Kafka consumer; spawns MCP server
 │   ├── state.py              # AgentState TypedDict
-│   ├── tools.py              # get_player_stats, analyze_momentum, generate_insight, send_alert
-│   └── output.py             # Insight logger
+│   ├── tools.py              # get_player_stats, analyze_momentum, send_alert
+│   ├── output.py             # Insight logger
+│   └── mcp_server/
+│       └── server.py         # MCP server: get_player_profile (stdio subprocess)
 ├── data/
-│   └── insights.jsonl        # Persisted agent outputs
+│   ├── insights.jsonl        # Persisted agent outputs (gitignored)
+│   └── player_profiles.json  # MCP cache, populated on demand (gitignored)
 └── tests/
     ├── test_tools.py
     └── test_agent.py
@@ -60,6 +66,7 @@ nba-agent/
 | Kafka client | `confluent-kafka` |
 | NBA data | `nba_api` |
 | Kafka runtime | Docker Compose (Confluent images) |
+| MCP | `mcp` (FastMCP server) + `langchain-mcp-adapters` (LangGraph bridge) |
 | Config | `python-dotenv` |
 | Types | `pydantic` v2 |
 
@@ -98,6 +105,9 @@ Fetches the player's current game stats (points, rebounds, assists, +/-) plus se
 ### `analyze_momentum(game_id: str, current_period: int, current_time: str) -> dict`
 Looks at the last 5 scoring plays to determine which team has momentum. Returns scoring run info (e.g., "LAL on a 9-2 run").
 
+### `get_player_profile(player_id: str) -> dict` *(MCP-backed)*
+Career-level context: bio, draft (year/round/pick), school, current + previous teams (chronological, return-to-team order preserved), career averages (ppg/rpg/apg), postseason career highs. Lives in a separate stdio subprocess (`src/mcp_server/server.py`) bridged into the LangGraph agent via `langchain-mcp-adapters`. Persistent disk cache at `data/player_profiles.json`.
+
 ### `send_alert(insight: str, severity: str) -> None`
 Logs the insight to stdout and appends it to `data/insights.jsonl`. Severity levels: `"routine"` | `"notable"` | `"critical"`.
 
@@ -123,7 +133,7 @@ This is an **agentic loop**, not a fixed pipeline. The model decides which tools
 
 ### Nodes
 - **`classify_event`** — model call. Receives the raw event, `game_context`, and any prior tool results. Decides among three actions: emit `tool_calls` to gather more data, return plain text to skip, or signal it's ready to generate an insight (e.g., via a structured "ready" sentinel or a final tool call to a no-op `mark_ready` tool).
-- **`call_tools`** — executes `get_player_stats` and/or `analyze_momentum`, appends results to `messages`, routes back to `classify_event`.
+- **`call_tools`** — executes any of `get_player_stats`, `analyze_momentum`, or the MCP-bridged `get_player_profile`, appends results to `messages`, routes back to `classify_event`. The MCP tool is invoked async over the persistent stdio session opened in `main()`.
 - **`generate_insight`** — dedicated node (not a tool) that calls Claude Sonnet 4.6 with the accumulated context to produce a 2–3 sentence ESPN-style narrative. Sets `state.insight`.
 - **`send_alert`** — tool node that logs and persists the insight.
 
@@ -220,17 +230,20 @@ PRODUCER_DELAY_SECONDS=0.5
 
 ```bash
 # 1. Start Kafka
-docker-compose up -d
+docker compose up -d
 
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Start the agent (consumer)
+# 3. Start the agent (consumer) — also spawns the MCP server subprocess
 python -m src.agent
 
 # 4. In a separate terminal, run the producer
 python -m src.producer
 ```
+
+Note: `docker compose` (subcommand) is the modern Docker Desktop invocation. If
+you have the legacy `docker-compose` binary installed, that works too.
 
 ---
 
@@ -240,7 +253,7 @@ python -m src.producer
   `cdn.nba.com/static/json/liveData/*`. The NBA's CDN doesn't offer push, but a
   5s poll gives ~10-30s end-to-end latency, which is fine for the demo. See
   `src/producer_live.py`.
-- Add an MCP server tool (`get_player_profile`) to demonstrate MCP + LangGraph integration
+- ~~Add an MCP server tool (`get_player_profile`) to demonstrate MCP + LangGraph integration~~ — done. See `src/mcp_server/server.py` and the MCP section in the README.
 - Add a LangSmith tracing integration for observability
 - Expose insights via a simple FastAPI endpoint
 
@@ -254,4 +267,4 @@ Open items deferred from the first pass. Address before considering the project 
   across producer, tools, output, and agent helpers. A graph-level
   happy-path test (mocking both LLMs) is still missing as a nice-to-have.
 - [x] **Replace `.env` with `.env.example` in the repo.** Done.
-- [ ] **Pull the MCP server tool forward from Phase 2.** An MCP-backed `get_player_profile` (career stats, bio, recent news) is a stronger portfolio differentiator than the other Phase 2 items. Consider promoting it into Phase 1 scope and demoting FastAPI/LangSmith.
+- [x] **Pull the MCP server tool forward from Phase 2.** Done — `get_player_profile` lives in `src/mcp_server/server.py` as a FastMCP stdio server, bridged into the agent via `langchain-mcp-adapters`. Caches to `data/player_profiles.json`. "Recent news" was dropped from the spec (no clean nba_api source); accolades likewise.
