@@ -14,7 +14,8 @@ from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 
-load_dotenv(override=True)
+# shell env wins over .env — lets inline overrides take effect
+load_dotenv()
 
 sys.path.insert(0, ".")
 

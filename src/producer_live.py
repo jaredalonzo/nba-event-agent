@@ -43,7 +43,8 @@ from src.nba_live_client import (
     find_live_game,
 )
 
-load_dotenv(override=True)
+# shell env wins over .env — lets inline overrides take effect
+load_dotenv()
 
 BOOTSTRAP_SERVERS = os.environ["KAFKA_BOOTSTRAP_SERVERS"]
 TOPIC = os.environ["KAFKA_TOPIC"]

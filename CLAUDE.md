@@ -224,6 +224,9 @@ NBA_GAME_ID=0041500407
 PRODUCER_DELAY_SECONDS=0.5
 ```
 
+`.env` supplies defaults; shell env vars override them. To override for one
+run, prefix the command: `KAFKA_GROUP_ID=foo .venv/bin/python -m src.agent`.
+
 ---
 
 ## Running the Project
