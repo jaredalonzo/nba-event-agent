@@ -43,9 +43,8 @@ from src.prefilter import should_skip
 from src.state import Action, AgentState
 from src.tools import AGENT_TOOLS, PERSIST_TOOLS
 
-# override=True so .env values trump pre-existing (empty) shell vars. Without
-# this, an empty ANTHROPIC_API_KEY in the shell silently shadows the real key.
-load_dotenv(override=True)
+# shell env wins over .env — lets inline overrides take effect
+load_dotenv()
 
 BOOTSTRAP_SERVERS = os.environ["KAFKA_BOOTSTRAP_SERVERS"]
 TOPIC = os.environ["KAFKA_TOPIC"]

@@ -25,7 +25,8 @@ from dotenv import load_dotenv
 from src.nba_live_client import extract_actions, fetch_playbyplay
 from src.producer_live import adapt_action
 
-load_dotenv(override=True)
+# shell env wins over .env — lets inline overrides take effect
+load_dotenv()
 
 
 def main() -> None:
