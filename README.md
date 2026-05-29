@@ -231,6 +231,8 @@ Beyond the current scope:
 - ~~Add an MCP server tool (`get_player_profile`) to demonstrate MCP + LangGraph integration~~ — done
 - LangSmith tracing for observability
 - FastAPI endpoint exposing the insight stream
+- PostgreSQL persistence for raw plays + agent decisions (see [JAR-8](https://linear.app/jared-alonzo/issue/JAR-8/feat-store-play-by-play-data-to-postgresql))
+- ~~Apache Flink as a stream processing layer~~ — evaluated and deferred; LLM latency is the bottleneck, not throughput. Worth revisiting at 10+ simultaneous games or if the project moves to the JVM.
 
 ---
 

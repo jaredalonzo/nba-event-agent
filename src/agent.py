@@ -48,11 +48,21 @@ load_dotenv()
 
 BOOTSTRAP_SERVERS = os.environ["KAFKA_BOOTSTRAP_SERVERS"]
 TOPIC = os.environ["KAFKA_TOPIC"]
-# Append a timestamp suffix so every run gets a fresh consumer group and replays
-# the topic from the beginning. auto.offset.reset=earliest only kicks in when
-# a group has no committed offset for the partition — so without this, a second
-# run with the same group ID would silently see nothing (we're at the tail).
-GROUP_ID = f"{os.environ['KAFKA_GROUP_ID']}-{int(time.time())}"
+# Default behavior: stable group ID. The consumer commits after each event
+# (see the loop), so a restart picks up exactly where it left off — useful
+# during live games when the agent may get kicked from the group on a slow
+# event, or when you Ctrl-C and want to resume without losing context.
+#
+# Set KAFKA_REPLAY=true to append a timestamp suffix to the group ID, which
+# forces a fresh consumer group every run (and combined with
+# auto.offset.reset=earliest, replays the topic from offset 0). Use this for
+# demos, cost benchmarking, or any time you want deterministic re-runs.
+_REPLAY = os.environ.get("KAFKA_REPLAY", "").strip().lower() in ("1", "true", "yes")
+GROUP_ID = (
+    f"{os.environ['KAFKA_GROUP_ID']}-{int(time.time())}"
+    if _REPLAY
+    else os.environ["KAFKA_GROUP_ID"]
+)
 
 
 def parse_clock(pt: str | None) -> str:
@@ -575,11 +585,25 @@ _graph: Any = None
 
 
 def build_consumer() -> Consumer:
-    """Construct the Kafka consumer with replay-friendly defaults.
+    """Construct the Kafka consumer with resume-friendly defaults.
 
-    auto.offset.reset=earliest: new groups read from offset 0.
-    enable.auto.commit=false:   we don't want crashes to silently advance the
-                                offset during iteration — explicit commits only.
+    auto.offset.reset=earliest: a brand-new group (first run, or KAFKA_REPLAY
+                                mode) reads from offset 0. Once we've committed
+                                an offset, this setting stops mattering.
+    enable.auto.commit=false:   the consumer loop commits explicitly after each
+                                successful event. Auto-commit would advance the
+                                offset on a fixed timer regardless of whether
+                                the event was actually processed, which can
+                                silently skip events on a crash.
+    max.poll.interval.ms=30m:   per-event processing can be slow (MCP nba_api
+                                fetches on first-time players, occasional
+                                Anthropic retry loops). The 5-min default kicks
+                                the consumer out of the group on the long tail;
+                                30 minutes gives generous headroom while still
+                                catching a truly hung process. Even if we do
+                                get kicked, per-event commits mean we resume
+                                cleanly on restart.
+    session.timeout.ms=60s:     liveness probe; independent of poll cadence.
     """
     return Consumer(
         {
@@ -587,6 +611,8 @@ def build_consumer() -> Consumer:
             "group.id": GROUP_ID,
             "auto.offset.reset": "earliest",
             "enable.auto.commit": False,
+            "max.poll.interval.ms": 30 * 60 * 1000,
+            "session.timeout.ms": 60 * 1000,
         }
     )
 
@@ -696,6 +722,17 @@ async def main() -> None:
                 event = json.loads(msg.value())
                 processed += 1
                 await _process_event(event, tracker, seen_pairs)
+
+                # Commit synchronously after each successful event. This is
+                # what makes restart-resume work: on the next run, the
+                # consumer picks up at the next un-committed offset. The
+                # commit is cheap (one round-trip to the broker) and the
+                # event volume is low (a game produces ~500 events), so we
+                # don't need to batch. If the agent crashes mid-event, the
+                # event will be re-delivered on restart — duplicate work is
+                # acceptable because insights.jsonl is append-only and a
+                # human will see any duplicates immediately.
+                consumer.commit(message=msg, asynchronous=False)
 
                 # Every 50 events, dump the top 3 foul counts for color.
                 if processed % 50 == 0:

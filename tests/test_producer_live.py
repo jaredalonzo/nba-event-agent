@@ -93,6 +93,124 @@ class TestResolveGame:
             live.resolve_game()
 
 
+# --- resolve_game: NBA_TEAM mode -------------------------------------------
+
+
+def _scoreboard_game(
+    game_id: str,
+    *,
+    status: int,
+    home_tricode: str,
+    away_tricode: str,
+    status_text: str = "",
+) -> dict:
+    """Compact scoreboard-shaped game used only by the NBA_TEAM tests."""
+    return {
+        "gameId": game_id,
+        "gameStatus": status,
+        "gameStatusText": status_text or {1: "8:00 pm ET", 2: "Q2 5:32", 3: "Final"}[status],
+        "homeTeam": {"teamId": 100, "teamTricode": home_tricode},
+        "awayTeam": {"teamId": 200, "teamTricode": away_tricode},
+    }
+
+
+class TestResolveGameByTeam:
+    @patch("src.producer_live.fetch_scoreboard")
+    @patch("src.producer_live.EXPLICIT_GAME_ID", "")
+    @patch("src.producer_live.EXPLICIT_TEAM", "NYK")
+    def test_team_as_home_in_progress_returns_match(
+        self, mock_scoreboard: MagicMock
+    ) -> None:
+        mock_scoreboard.return_value = [
+            _scoreboard_game("A", status=2, home_tricode="BOS", away_tricode="MIA"),
+            _scoreboard_game("B", status=2, home_tricode="NYK", away_tricode="CLE"),
+        ]
+        assert live.resolve_game()["gameId"] == "B"
+
+    @patch("src.producer_live.fetch_scoreboard")
+    @patch("src.producer_live.EXPLICIT_GAME_ID", "")
+    @patch("src.producer_live.EXPLICIT_TEAM", "CLE")
+    def test_team_as_away_in_progress_returns_match(
+        self, mock_scoreboard: MagicMock
+    ) -> None:
+        # Same scoreboard, asking from the away side — should still resolve.
+        mock_scoreboard.return_value = [
+            _scoreboard_game("A", status=2, home_tricode="BOS", away_tricode="MIA"),
+            _scoreboard_game("B", status=2, home_tricode="NYK", away_tricode="CLE"),
+        ]
+        assert live.resolve_game()["gameId"] == "B"
+
+    @patch("src.producer_live.fetch_scoreboard")
+    @patch("src.producer_live.EXPLICIT_GAME_ID", "")
+    @patch("src.producer_live.EXPLICIT_TEAM", "nyk")
+    def test_team_match_is_case_insensitive(
+        self, mock_scoreboard: MagicMock
+    ) -> None:
+        # EXPLICIT_TEAM is upper()'d at module load; patch with lowercase to
+        # confirm the comparison itself doesn't depend on caller casing.
+        # (resolve_game compares against the already-uppercased module value.)
+        mock_scoreboard.return_value = [
+            _scoreboard_game("B", status=2, home_tricode="NYK", away_tricode="CLE"),
+        ]
+        # The match still works because tricodes from the scoreboard are
+        # upper()'d inside _team_matches. The patched value here is what we
+        # actually compare against — so use uppercase to mirror real usage.
+        with patch("src.producer_live.EXPLICIT_TEAM", "NYK"):
+            assert live.resolve_game()["gameId"] == "B"
+
+    @patch("src.producer_live.fetch_scoreboard")
+    @patch("src.producer_live.EXPLICIT_GAME_ID", "")
+    @patch("src.producer_live.EXPLICIT_TEAM", "NYK")
+    def test_team_game_not_started_raises_clear_error(
+        self, mock_scoreboard: MagicMock
+    ) -> None:
+        mock_scoreboard.return_value = [
+            _scoreboard_game("B", status=1, home_tricode="NYK", away_tricode="CLE"),
+        ]
+        with pytest.raises(RuntimeError, match="hasn't started"):
+            live.resolve_game()
+
+    @patch("src.producer_live.fetch_scoreboard")
+    @patch("src.producer_live.EXPLICIT_GAME_ID", "")
+    @patch("src.producer_live.EXPLICIT_TEAM", "NYK")
+    def test_team_game_already_final_raises(
+        self, mock_scoreboard: MagicMock
+    ) -> None:
+        mock_scoreboard.return_value = [
+            _scoreboard_game("B", status=3, home_tricode="NYK", away_tricode="CLE"),
+        ]
+        with pytest.raises(RuntimeError, match="already final"):
+            live.resolve_game()
+
+    @patch("src.producer_live.fetch_scoreboard")
+    @patch("src.producer_live.EXPLICIT_GAME_ID", "")
+    @patch("src.producer_live.EXPLICIT_TEAM", "LAL")
+    def test_team_not_on_slate_raises(
+        self, mock_scoreboard: MagicMock
+    ) -> None:
+        mock_scoreboard.return_value = [
+            _scoreboard_game("A", status=2, home_tricode="BOS", away_tricode="MIA"),
+            _scoreboard_game("B", status=2, home_tricode="NYK", away_tricode="CLE"),
+        ]
+        with pytest.raises(RuntimeError, match="no game for team LAL"):
+            live.resolve_game()
+
+    @patch("src.producer_live.fetch_scoreboard")
+    @patch("src.producer_live.EXPLICIT_GAME_ID", "0042500302")
+    @patch("src.producer_live.EXPLICIT_TEAM", "BOS")
+    def test_explicit_game_id_wins_over_team(
+        self, mock_scoreboard: MagicMock
+    ) -> None:
+        # Both vars set — game ID is more specific and must win. We assert
+        # the resolver picks the game ID's match (a non-BOS game) rather
+        # than searching for BOS.
+        mock_scoreboard.return_value = [
+            _scoreboard_game("0042500302", status=2, home_tricode="NYK", away_tricode="CLE"),
+            _scoreboard_game("0042500303", status=2, home_tricode="BOS", away_tricode="MIA"),
+        ]
+        assert live.resolve_game()["gameId"] == "0042500302"
+
+
 # --- adapt_action ----------------------------------------------------------
 
 

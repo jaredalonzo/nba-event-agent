@@ -166,13 +166,37 @@ Topic config: 1 partition, replication factor 1 (local dev).
 
 ### Consumer offset & group semantics
 
-For a replayable demo, the consumer should be configured so each run sees the full event stream from the beginning:
+Two modes, selected by `KAFKA_REPLAY`:
 
-- `auto.offset.reset=earliest` — if no committed offset exists for the group, start from the first message rather than the tail.
-- `enable.auto.commit=false` — disable automatic offset commits while iterating on the agent, so a crash doesn't silently skip events on the next run.
-- Use a **fresh `KAFKA_GROUP_ID`** for each demo run (e.g., `nba-agent-group-${timestamp}`), or manually reset offsets with `kafka-consumer-groups --reset-offsets --to-earliest` between runs.
+**Default (resume mode)** — `KAFKA_REPLAY` unset:
+- Stable `KAFKA_GROUP_ID` (no timestamp suffix).
+- Agent commits the offset synchronously after each successfully processed event.
+- Restart picks up exactly where it left off. This is what you want during live games or whenever you Ctrl-C and resume.
+- First run on a fresh group still replays from offset 0 (via `auto.offset.reset=earliest`).
 
-Without these, the second run of the agent will appear to do nothing — the group's committed offset is at the end of the topic, so there are no new events to consume.
+**Replay mode** — `KAFKA_REPLAY=true`:
+- Group ID gets a timestamp suffix at runtime → every run gets a fresh group.
+- Combined with `auto.offset.reset=earliest`, this replays the full topic from offset 0 every time.
+- Use this for demos, cost benchmarking, or any run-to-run comparison where determinism matters more than picking up where you left off.
+
+Other consumer config (constant across modes):
+- `enable.auto.commit=false` — explicit commits only, so partial work never silently advances the offset.
+- `max.poll.interval.ms=30m` — generous headroom for slow events (MCP nba_api fetches, occasional Anthropic retries). Even if we still get kicked out of the group, per-event commits mean we resume cleanly on restart.
+- `session.timeout.ms=60s` — independent liveness probe.
+
+Tools:
+- `scripts/seek_offset.py inspect [--group ID]` — show topic state and any committed offsets for a named group.
+- `scripts/seek_offset.py seed --group ID (--latest | --offset N | --minutes-ago N)` — commit a specific starting offset for the named group (skip ahead, jump back, etc.).
+
+### Environment variable convention
+
+`.env` supplies defaults; shell env vars override them. To override for one run, prefix the command:
+
+```bash
+KAFKA_GROUP_ID=foo NBA_GAME_ID=0042500304 .venv/bin/python -m src.agent
+```
+
+Entrypoints should use plain `load_dotenv()` — never `load_dotenv(override=True)`. The override flag silently clobbers shell env, which breaks the inline-prefix pattern above. If you're adding a new entrypoint, mirror the pattern.
 
 ---
 

@@ -6,11 +6,14 @@ module is the real thing: it polls the NBA's live JSON CDN (via
 ``src/nba_live_client.py``), publishes new plays to Kafka as they appear, and
 exits cleanly when the game ends.
 
-Two modes for selecting which game to stream:
+Three modes for selecting which game to stream, in priority order:
 
-    Explicit: ``NBA_GAME_ID`` env var set to a game ID — must be in progress.
-    Auto:     ``NBA_GAME_ID`` empty/unset — picks the first in-progress game
-              from today's scoreboard; clear error if none are live.
+    Explicit ID:  ``NBA_GAME_ID`` set to a game ID — must be in progress.
+    By team:      ``NBA_TEAM`` set to a tricode (e.g. ``NYK``) — finds today's
+                  game for that team; reports clear status if scheduled, in
+                  progress, or final.
+    Auto:         neither set — picks the first in-progress game from today's
+                  scoreboard; clear error if none are live.
 
 Shape adapter: the live endpoint returns slightly different fields than the
 historical ``PlayByPlayV3``. Notably it lacks ``location`` ("h"/"v"). We inject
@@ -49,20 +52,46 @@ load_dotenv()
 BOOTSTRAP_SERVERS = os.environ["KAFKA_BOOTSTRAP_SERVERS"]
 TOPIC = os.environ["KAFKA_TOPIC"]
 POLL_SECONDS = float(os.environ.get("LIVE_POLL_SECONDS", "5.0"))
-# Empty string and unset both mean "auto-discover from scoreboard".
+# Empty string and unset both mean "fall through to the next mode".
 EXPLICIT_GAME_ID = (os.environ.get("NBA_GAME_ID") or "").strip()
+EXPLICIT_TEAM = (os.environ.get("NBA_TEAM") or "").strip().upper()
 
 
 # --- Game resolution -------------------------------------------------------
 
 
+def _team_matches(game: dict[str, Any], tricode: str) -> bool:
+    """True if ``tricode`` is either side of ``game``. Case-insensitive."""
+    home = ((game.get("homeTeam") or {}).get("teamTricode") or "").upper()
+    away = ((game.get("awayTeam") or {}).get("teamTricode") or "").upper()
+    return tricode == home or tricode == away
+
+
+def _require_in_progress(game: dict[str, Any], label: str) -> dict[str, Any]:
+    """Return ``game`` if status=2, else raise with a status-aware message."""
+    status = game.get("gameStatus")
+    if status == 2:
+        return game
+    if status == 1:
+        raise RuntimeError(
+            f"{label} hasn't started yet "
+            f"(status={status}, {game.get('gameStatusText')})"
+        )
+    if status == 3:
+        raise RuntimeError(f"{label} is already final")
+    raise RuntimeError(f"{label} has unexpected status: {status}")
+
+
 def resolve_game() -> dict[str, Any]:
     """Pick a game to stream.
 
-    If ``NBA_GAME_ID`` is set, fetch the scoreboard, look up that game, and
-    verify it's actually in progress (status=2). If not set, return the first
-    in-progress game on today's slate. Raises ``RuntimeError`` if no usable
-    game can be found — callers should print the message and exit.
+    Priority:
+      1. ``NBA_GAME_ID`` — look up that specific game (must be in progress).
+      2. ``NBA_TEAM``   — find today's game for that team tricode.
+      3. Auto-discover — first in-progress game on today's slate.
+
+    Raises ``RuntimeError`` if no usable game can be found — callers should
+    print the message and exit.
     """
     games = fetch_scoreboard()
     if not games:
@@ -71,28 +100,31 @@ def resolve_game() -> dict[str, Any]:
     if EXPLICIT_GAME_ID:
         for g in games:
             if g.get("gameId") == EXPLICIT_GAME_ID:
-                status = g.get("gameStatus")
-                if status == 2:
-                    return g
-                if status == 1:
-                    raise RuntimeError(
-                        f"game {EXPLICIT_GAME_ID} hasn't started yet "
-                        f"(status={status}, {g.get('gameStatusText')})"
-                    )
-                if status == 3:
-                    raise RuntimeError(
-                        f"game {EXPLICIT_GAME_ID} is already final"
-                    )
+                return _require_in_progress(g, f"game {EXPLICIT_GAME_ID}")
         raise RuntimeError(
             f"game {EXPLICIT_GAME_ID} not in today's scoreboard"
         )
+
+    if EXPLICIT_TEAM:
+        matches = [g for g in games if _team_matches(g, EXPLICIT_TEAM)]
+        if not matches:
+            raise RuntimeError(
+                f"no game for team {EXPLICIT_TEAM} on today's slate"
+            )
+        # Same team could conceivably appear twice in a doubleheader scenario.
+        # Prefer an in-progress game; else fall back to the first match so the
+        # caller gets the status-aware error from _require_in_progress.
+        in_progress = next((g for g in matches if g.get("gameStatus") == 2), None)
+        if in_progress is not None:
+            return in_progress
+        return _require_in_progress(matches[0], f"team {EXPLICIT_TEAM}'s game")
 
     # Auto-discover
     live = find_live_game()
     if live is None:
         raise RuntimeError(
-            "no in-progress games on today's slate; set NBA_GAME_ID to a "
-            "specific in-progress game ID, or wait for tipoff"
+            "no in-progress games on today's slate; set NBA_GAME_ID or "
+            "NBA_TEAM, or wait for tipoff"
         )
     return live
 
