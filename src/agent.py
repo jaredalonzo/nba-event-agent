@@ -195,6 +195,14 @@ class GameContextTracker:
 # if Anthropic later lowers Haiku's cache minimum.
 _llm = ChatAnthropic(model="claude-haiku-4-5", temperature=0)
 
+# Stay safely under Tier 1's 50 RPM Haiku limit. classify_event is called
+# once per event (or 2-3 times when it loops through tool calls), so 45 RPM
+# gives ~10% headroom. Time-based bucket is sufficient because event
+# processing is sequential — only one classify_event call is ever in flight.
+_CLASSIFIER_RPM = int(os.environ.get("CLASSIFIER_RPM", "45"))
+_classifier_min_interval = 60.0 / _CLASSIFIER_RPM
+_classifier_last_call: float = 0.0
+
 # Tool-bound classifier is built at startup (see main()), AFTER the MCP
 # subprocess has been spawned and its tools discovered. We can't eagerly bind
 # AGENT_TOOLS here because the agent would then be missing get_player_profile —
@@ -273,6 +281,12 @@ def classify_event(state: AgentState) -> dict:
     messages are present in state["messages"] and we feed them all back to
     the model so it can incorporate the tool results.
     """
+    global _classifier_last_call
+    wait = _classifier_min_interval - (time.monotonic() - _classifier_last_call)
+    if wait > 0:
+        time.sleep(wait)
+    _classifier_last_call = time.monotonic()
+
     event = state["event"]
     context = state["game_context"]
     prior = state.get("messages", [])
