@@ -663,9 +663,10 @@ class TestProcessEventDatabase:
     """DB write integration within _process_event."""
 
     @patch("src.agent._graph")
+    @patch("src.agent.db_module.persist_event_and_decision", new_callable=AsyncMock)
     @patch("src.agent.db_module.upsert_play", new_callable=AsyncMock)
     def test_upsert_play_called_for_all_events_including_dup(
-        self, mock_upsert_play: AsyncMock, mock_graph: MagicMock
+        self, mock_upsert_play: AsyncMock, mock_persist: AsyncMock, mock_graph: MagicMock
     ) -> None:
         mock_graph.ainvoke = AsyncMock(
             return_value={"action": Action.SKIPPED_OTHER, "severity": None, "messages": []}
@@ -682,12 +683,12 @@ class TestProcessEventDatabase:
         assert mock_graph.ainvoke.await_count == 1
 
     @patch("src.agent._graph")
-    @patch("src.agent.db_module.upsert_decision", new_callable=AsyncMock)
+    @patch("src.agent.db_module.persist_event_and_decision", new_callable=AsyncMock)
     @patch("src.agent.db_module.upsert_play", new_callable=AsyncMock)
-    def test_upsert_decision_called_after_graph(
+    def test_persist_event_and_decision_called_after_graph(
         self,
         mock_upsert_play: AsyncMock,
-        mock_upsert_decision: AsyncMock,
+        mock_persist: AsyncMock,
         mock_graph: MagicMock,
     ) -> None:
         mock_graph.ainvoke = AsyncMock(
@@ -706,20 +707,20 @@ class TestProcessEventDatabase:
             _process_event(make_event(actionNumber=5, gameId="0041500407"), tracker, seen, pool)
         )
 
-        mock_upsert_decision.assert_awaited_once()
-        _, kwargs = mock_upsert_decision.call_args
+        mock_persist.assert_awaited_once()
+        _, kwargs = mock_persist.call_args
         assert kwargs["action"] == "analyzed"
         assert kwargs["severity"] == "notable"
         assert kwargs["game_id"] == "0041500407"
         assert kwargs["action_number"] == 5
 
     @patch("src.agent._graph")
-    @patch("src.agent.db_module.upsert_decision", new_callable=AsyncMock)
+    @patch("src.agent.db_module.persist_event_and_decision", new_callable=AsyncMock)
     @patch("src.agent.db_module.upsert_play", new_callable=AsyncMock)
     def test_no_db_calls_when_pool_is_none(
         self,
         mock_upsert_play: AsyncMock,
-        mock_upsert_decision: AsyncMock,
+        mock_persist: AsyncMock,
         mock_graph: MagicMock,
     ) -> None:
         mock_graph.ainvoke = AsyncMock(
@@ -731,15 +732,15 @@ class TestProcessEventDatabase:
         asyncio.run(_process_event(make_event(), tracker, seen, db_pool=None))
 
         mock_upsert_play.assert_not_awaited()
-        mock_upsert_decision.assert_not_awaited()
+        mock_persist.assert_not_awaited()
 
     @patch("src.agent._graph")
-    @patch("src.agent.db_module.upsert_decision", new_callable=AsyncMock)
+    @patch("src.agent.db_module.persist_event_and_decision", new_callable=AsyncMock)
     @patch("src.agent.db_module.upsert_play", new_callable=AsyncMock)
     def test_no_db_calls_when_game_id_missing(
         self,
         mock_upsert_play: AsyncMock,
-        mock_upsert_decision: AsyncMock,
+        mock_persist: AsyncMock,
         mock_graph: MagicMock,
     ) -> None:
         mock_graph.ainvoke = AsyncMock(
@@ -754,15 +755,15 @@ class TestProcessEventDatabase:
         )
 
         mock_upsert_play.assert_not_awaited()
-        mock_upsert_decision.assert_not_awaited()
+        mock_persist.assert_not_awaited()
 
     @patch("src.agent._graph")
-    @patch("src.agent.db_module.upsert_decision", new_callable=AsyncMock)
+    @patch("src.agent.db_module.persist_event_and_decision", new_callable=AsyncMock)
     @patch("src.agent.db_module.upsert_play", new_callable=AsyncMock)
     def test_no_db_calls_when_action_number_missing(
         self,
         mock_upsert_play: AsyncMock,
-        mock_upsert_decision: AsyncMock,
+        mock_persist: AsyncMock,
         mock_graph: MagicMock,
     ) -> None:
         mock_graph.ainvoke = AsyncMock(
@@ -777,4 +778,4 @@ class TestProcessEventDatabase:
         )
 
         mock_upsert_play.assert_not_awaited()
-        mock_upsert_decision.assert_not_awaited()
+        mock_persist.assert_not_awaited()

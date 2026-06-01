@@ -99,6 +99,57 @@ async def upsert_play(pool: asyncpg.Pool, event: dict[str, Any]) -> None:
         logger.exception("upsert_play failed for action %s", event.get("actionNumber"))
 
 
+async def persist_event_and_decision(
+    pool: asyncpg.Pool,
+    event: dict[str, Any],
+    game_id: str,
+    action_number: int,
+    action: str,
+    insight: str | None,
+    severity: str | None,
+) -> None:
+    """Write play + decision atomically in one transaction.
+
+    The play upsert uses ON CONFLICT DO NOTHING, so if upsert_play already
+    ran at the top of _process_event the row is a no-op here. What the
+    transaction buys: the decision can never land without the play being
+    confirmed in the same commit, and a failure in either rolls both back.
+    """
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    _UPSERT_PLAY,
+                    game_id,
+                    action_number,
+                    event.get("period"),
+                    event.get("clock"),
+                    event.get("description"),
+                    event.get("actionType"),
+                    event.get("subType"),
+                    event.get("teamId"),
+                    event.get("teamTricode"),
+                    event.get("location"),
+                    event.get("personId"),
+                    event.get("playerName"),
+                    event.get("scoreHome"),
+                    event.get("scoreAway"),
+                    json.dumps(event),
+                )
+                await conn.execute(
+                    _UPSERT_DECISION,
+                    game_id,
+                    action_number,
+                    action,
+                    insight,
+                    severity,
+                )
+    except Exception:
+        logger.exception(
+            "persist_event_and_decision failed for action %s", action_number
+        )
+
+
 async def upsert_decision(
     pool: asyncpg.Pool,
     game_id: str | None,

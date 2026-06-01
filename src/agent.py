@@ -857,8 +857,9 @@ async def _process_event(
     severity = final_state.get("severity")
 
     if _db_active:
-        await db_module.upsert_decision(
+        await db_module.persist_event_and_decision(
             db_pool,
+            event,
             game_id=_game_id,
             action_number=_action_number,
             action=action.value,
