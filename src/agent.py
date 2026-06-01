@@ -38,6 +38,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from src import db as db_module
 from src.cost_log import CostTracker
 from src.prefilter import should_skip
 from src.state import Action, AgentState
@@ -687,6 +688,17 @@ async def main() -> None:
     )
 
     consumer = build_consumer()
+
+    _database_url = os.environ.get("DATABASE_URL", "").strip()
+    db_pool: Any | None = None
+    if _database_url:
+        try:
+            db_pool = await db_module.create_pool(_database_url)
+            await db_module.ensure_schema(db_pool)
+            print("[agent] postgres connected — plays and decisions will be persisted", flush=True)
+        except Exception as exc:
+            print(f"[agent] postgres unavailable, continuing without DB: {exc}", flush=True)
+            db_pool = None
     consumer.subscribe([TOPIC])
 
     # One tracker per run; attached as a callback on both ChatAnthropic
@@ -735,7 +747,7 @@ async def main() -> None:
 
                 event = json.loads(msg.value())
                 processed += 1
-                await _process_event(event, tracker, seen_pairs)
+                await _process_event(event, tracker, seen_pairs, db_pool)
 
                 # Commit synchronously after each successful event. This is
                 # what makes restart-resume work: on the next run, the
@@ -762,6 +774,8 @@ async def main() -> None:
 
         finally:
             consumer.close()
+            if db_pool is not None:
+                await db_pool.close()
             print(f"\n[agent] consumed {processed} events. exiting.", flush=True)
             # Always emit the cost summary, even on abnormal exit — the run
             # may have been short, but the tracker still has data worth
@@ -778,12 +792,16 @@ async def _process_event(
     event: dict,
     tracker: GameContextTracker,
     seen_pairs: set[tuple[str, int]],
+    db_pool: Any | None = None,
 ) -> None:
     """Fold one event into the tracker, then invoke the graph unless deduped.
 
     Extracted so the dedup logic is testable without spinning up Kafka.
     """
     snapshot = tracker.update(event)
+
+    if db_pool is not None:
+        await db_module.upsert_play(db_pool, event)
 
     pair_key = (event.get("gameId"), event.get("actionNumber"))
     if pair_key in seen_pairs:
@@ -827,6 +845,16 @@ async def _process_event(
     final_state = await _graph.ainvoke(initial_state)
     action = final_state["action"]
     severity = final_state.get("severity")
+
+    if db_pool is not None:
+        await db_module.upsert_decision(
+            db_pool,
+            game_id=event.get("gameId"),
+            action_number=event.get("actionNumber"),
+            action=action.value,
+            insight=final_state.get("insight"),
+            severity=severity,
+        )
 
     tool_call_count = sum(
         len(getattr(m, "tool_calls", []) or [])
