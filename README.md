@@ -24,8 +24,8 @@ Simulated play-by-play (nba_api)
    Kafka topic: nba.plays
         ↓
    Consumer + LangGraph agent ──► MCP subprocess (career profile)
-        ↓
-   data/insights.jsonl
+        ↓               ↓
+   data/insights.jsonl  PostgreSQL (plays + agent decisions)
 ```
 
 The consumer maintains a stateful `GameContextTracker` keyed by game ID — running score, quarter, time, last five scoring plays, per-player foul counts — folded across the event stream. Before each graph invocation, it attaches a fresh snapshot to the agent state. The graph itself is stateless across events.
@@ -78,6 +78,7 @@ Routine free throws, substitutions, and early-quarter timeouts are skipped witho
 | Kafka runtime    | Confluent Platform 7.5 via Docker Compose               |
 | NBA data         | `nba_api` (`PlayByPlayV3` endpoint)                     |
 | MCP              | `mcp` (FastMCP server) + `langchain-mcp-adapters` bridge |
+| Database         | PostgreSQL 16 + `asyncpg`                               |
 | Config           | `python-dotenv`                                         |
 | Types            | `pydantic` v2                                           |
 
@@ -87,7 +88,7 @@ Routine free throws, substitutions, and early-quarter timeouts are skipped witho
 
 ```
 nba-event-agent/
-├── docker-compose.yml      # Zookeeper + Kafka
+├── docker-compose.yml      # Zookeeper + Kafka + PostgreSQL
 ├── requirements.txt
 ├── .env.example            # template; copy to .env (gitignored)
 ├── src/
@@ -95,6 +96,7 @@ nba-event-agent/
 │   ├── producer_live.py    # cdn.nba.com → Kafka (live polling)
 │   ├── nba_live_client.py  # requests wrapper for the live CDN
 │   ├── agent.py            # LangGraph graph + async consumer; spawns MCP server
+│   ├── db.py               # asyncpg pool, schema bootstrap, upsert helpers
 │   ├── state.py            # AgentState TypedDict, Action enum
 │   ├── tools.py            # get_player_stats, analyze_momentum, send_alert
 │   ├── output.py           # Insight persistence
@@ -138,7 +140,7 @@ cp .env.example .env
 Three terminals:
 
 ```bash
-# Terminal 1: bring Kafka up
+# Terminal 1: bring Kafka + PostgreSQL up
 docker compose up -d
 
 # Terminal 2: start the agent (consumer)
@@ -165,14 +167,13 @@ The historical producer is the demo path — works offline, reproducible. The li
 
 ### Re-running cleanly
 
-The consumer uses `auto.offset.reset=earliest` with `enable.auto.commit=false`, but a stale consumer-group offset will still cause the second run to look like nothing happens. For a fresh replay, change `KAFKA_GROUP_ID` in `.env` or reset offsets:
+By default the consumer commits offsets per-event, so restarting picks up where it left off. For a full replay from offset 0, set `KAFKA_REPLAY=true`:
 
 ```bash
-docker exec nba-kafka kafka-consumer-groups \
-  --bootstrap-server localhost:9092 \
-  --group "$KAFKA_GROUP_ID" \
-  --reset-offsets --to-earliest --topic nba.plays --execute
+KAFKA_REPLAY=true python -m src.agent
 ```
+
+This appends a timestamp to the consumer group ID on each run, giving every run a fresh group. Combined with `auto.offset.reset=earliest`, the full topic replays from the beginning every time. Use this for demos, cost benchmarking, or any time you want deterministic reruns.
 
 ---
 
@@ -231,7 +232,7 @@ Beyond the current scope:
 - ~~Add an MCP server tool (`get_player_profile`) to demonstrate MCP + LangGraph integration~~ — done
 - LangSmith tracing for observability
 - FastAPI endpoint exposing the insight stream
-- PostgreSQL persistence for raw plays + agent decisions (see [JAR-8](https://linear.app/jared-alonzo/issue/JAR-8/feat-store-play-by-play-data-to-postgresql))
+- ~~PostgreSQL persistence for raw plays + agent decisions~~ — done (`src/db.py`, `asyncpg`, postgres service in Docker Compose)
 - ~~Apache Flink as a stream processing layer~~ — evaluated and deferred; LLM latency is the bottleneck, not throughput. Worth revisiting at 10+ simultaneous games or if the project moves to the JVM.
 
 ---
