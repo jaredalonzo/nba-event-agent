@@ -732,3 +732,49 @@ class TestProcessEventDatabase:
 
         mock_upsert_play.assert_not_awaited()
         mock_upsert_decision.assert_not_awaited()
+
+    @patch("src.agent._graph")
+    @patch("src.agent.db_module.upsert_decision", new_callable=AsyncMock)
+    @patch("src.agent.db_module.upsert_play", new_callable=AsyncMock)
+    def test_no_db_calls_when_game_id_missing(
+        self,
+        mock_upsert_play: AsyncMock,
+        mock_upsert_decision: AsyncMock,
+        mock_graph: MagicMock,
+    ) -> None:
+        mock_graph.ainvoke = AsyncMock(
+            return_value={"action": Action.ANALYZED, "severity": "notable", "messages": []}
+        )
+        tracker = GameContextTracker()
+        seen: set = set()
+        pool = MagicMock()
+
+        asyncio.run(
+            _process_event(make_event(gameId=None, actionNumber=5), tracker, seen, pool)
+        )
+
+        mock_upsert_play.assert_not_awaited()
+        mock_upsert_decision.assert_not_awaited()
+
+    @patch("src.agent._graph")
+    @patch("src.agent.db_module.upsert_decision", new_callable=AsyncMock)
+    @patch("src.agent.db_module.upsert_play", new_callable=AsyncMock)
+    def test_no_db_calls_when_action_number_missing(
+        self,
+        mock_upsert_play: AsyncMock,
+        mock_upsert_decision: AsyncMock,
+        mock_graph: MagicMock,
+    ) -> None:
+        mock_graph.ainvoke = AsyncMock(
+            return_value={"action": Action.ANALYZED, "severity": "notable", "messages": []}
+        )
+        tracker = GameContextTracker()
+        seen: set = set()
+        pool = MagicMock()
+
+        asyncio.run(
+            _process_event(make_event(actionNumber=None, gameId="0041500407"), tracker, seen, pool)
+        )
+
+        mock_upsert_play.assert_not_awaited()
+        mock_upsert_decision.assert_not_awaited()

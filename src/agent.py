@@ -800,16 +800,26 @@ async def _process_event(
     """
     snapshot = tracker.update(event)
 
-    if db_pool is not None:
+    _game_id = event.get("gameId")
+    _action_number = event.get("actionNumber")
+    _db_active = db_pool is not None
+    if _db_active and (_game_id is None or _action_number is None):
+        print(
+            f"[agent] WARNING: skipping DB write — missing gameId or actionNumber: {event}",
+            flush=True,
+        )
+        _db_active = False
+
+    if _db_active:
         await db_module.upsert_play(db_pool, event)
 
-    pair_key = (event.get("gameId"), event.get("actionNumber"))
+    pair_key = (_game_id, _action_number)
     if pair_key in seen_pairs:
         # Same (gameId, actionNumber) as a prior event — second half of a
         # paired play (e.g. turnover + steal). Tracker already updated above;
         # skip the graph invocation to avoid a second contradictory insight.
         print(
-            f"[#{event.get('actionNumber', '?'):>3} "
+            f"[#{event.get('actionNumber') or '?':>3} "
             f"Q{snapshot['period']} {snapshot['clock']:>5}]  "
             f"(dup actionNumber, graph skipped)  "
             f"{event.get('description') or '(no description)'}",
@@ -826,7 +836,7 @@ async def _process_event(
     prefiltered = should_skip(event, snapshot)
     if prefiltered is not None:
         print(
-            f"[#{event.get('actionNumber', '?'):>3} "
+            f"[#{event.get('actionNumber') or '?':>3} "
             f"Q{snapshot['period']} {snapshot['clock']:>5}]  "
             f"(prefilter-skip)  "
             f"{event.get('description') or '(no description)'}  → {prefiltered}",
@@ -846,11 +856,11 @@ async def _process_event(
     action = final_state["action"]
     severity = final_state.get("severity")
 
-    if db_pool is not None:
+    if _db_active:
         await db_module.upsert_decision(
             db_pool,
-            game_id=event.get("gameId"),
-            action_number=event.get("actionNumber"),
+            game_id=_game_id,
+            action_number=_action_number,
             action=action.value,
             insight=final_state.get("insight"),
             severity=severity,
@@ -870,7 +880,7 @@ async def _process_event(
     tool_hint = f"  [tools={tool_call_count}]" if tool_call_count else ""
     sev_hint = f"  [{severity}]" if severity else ""
     print(
-        f"[#{event.get('actionNumber', '?'):>3} "
+        f"[#{event.get('actionNumber') or '?':>3} "
         f"Q{snapshot['period']} {snapshot['clock']:>5}]  "
         f"{score_str:<22}  {desc:<55}  → {action}{sev_hint}{tool_hint}",
         flush=True,
