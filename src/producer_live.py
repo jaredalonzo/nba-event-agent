@@ -251,12 +251,9 @@ def stream_game(
                 flush=True,
             )
             if consecutive_failures >= failure_budget:
-                print(
-                    f"[producer] exceeded failure budget "
-                    f"({failure_budget} consecutive); exiting",
-                    flush=True,
+                raise RuntimeError(
+                    f"exceeded failure budget ({failure_budget} consecutive pbp failures)"
                 )
-                raise SystemExit(1)
             # Exponential backoff: poll_seconds * 2^(n-1), capped at max_backoff.
             backoff = min(poll_seconds * (2 ** (consecutive_failures - 1)), max_backoff)
             time.sleep(backoff)
@@ -268,12 +265,9 @@ def stream_game(
         if cycle_failed:
             consecutive_failures += 1
             if consecutive_failures >= failure_budget:
-                print(
-                    f"[producer] exceeded failure budget "
-                    f"({failure_budget} consecutive); exiting",
-                    flush=True,
+                raise RuntimeError(
+                    f"exceeded failure budget ({failure_budget} consecutive scoreboard failures)"
                 )
-                raise SystemExit(1)
         else:
             consecutive_failures = 0
 
@@ -332,6 +326,9 @@ def main() -> None:
     producer = Producer({"bootstrap.servers": BOOTSTRAP_SERVERS})
     try:
         total = stream_game(producer, game, stop=stop)
+    except RuntimeError as e:
+        print(f"[producer] {e}", flush=True)
+        raise SystemExit(1)
     finally:
         producer.flush(timeout=10)
     print(f"[producer] done. {total} plays published to {TOPIC}.", flush=True)

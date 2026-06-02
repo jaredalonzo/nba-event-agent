@@ -497,9 +497,8 @@ class TestStreamGame:
         mock_scoreboard.return_value = [_game(status=2)]
         mock_pbp.side_effect = [LiveClientError("network down")] * 60
         producer = MagicMock()
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(RuntimeError, match="exceeded failure budget"):
             live.stream_game(producer, _game(), poll_seconds=0)
-        assert exc_info.value.code == 1
         # All 60 pbp attempts consumed.
         assert mock_pbp.call_count == 60
 
