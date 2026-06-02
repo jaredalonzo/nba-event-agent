@@ -150,22 +150,3 @@ async def persist_event_and_decision(
         )
 
 
-async def upsert_decision(
-    pool: asyncpg.Pool,
-    game_id: str | None,
-    action_number: int | None,
-    action: str,
-    insight: str | None,
-    severity: str | None,
-) -> None:
-    try:
-        await pool.execute(
-            _UPSERT_DECISION,
-            game_id,
-            action_number,
-            action,
-            insight,
-            severity,
-        )
-    except Exception:
-        logger.exception("upsert_decision failed for action %s", action_number)

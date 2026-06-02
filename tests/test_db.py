@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-from src.db import persist_event_and_decision, upsert_decision, upsert_play
+from src.db import persist_event_and_decision, upsert_play
 
 
 class TestUpsertPlaySwallowsException:
@@ -88,20 +88,3 @@ class TestPersistEventAndDecision:
         )
 
         assert conn.execute.await_count == 2
-
-
-class TestUpsertDecisionSwallowsException:
-    def test_pool_error_does_not_propagate(self) -> None:
-        pool = MagicMock()
-        pool.execute = AsyncMock(side_effect=RuntimeError("connection refused"))
-
-        asyncio.run(
-            upsert_decision(pool, "0041500407", 42, "analyzed", "Great play!", "notable")
-        )
-
-    def test_null_insight_and_severity_do_not_raise(self) -> None:
-        pool = MagicMock()
-        pool.execute = AsyncMock(return_value=None)
-
-        asyncio.run(upsert_decision(pool, "0041500407", 1, "skipped_routine", None, None))
-        pool.execute.assert_awaited_once()
