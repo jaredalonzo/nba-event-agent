@@ -24,6 +24,7 @@ import signal
 import sys
 import time
 import uuid
+from pathlib import Path
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,7 +32,7 @@ from typing import Any
 from confluent_kafka import Consumer, KafkaError
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
@@ -451,8 +452,6 @@ def _build_narrator_user_message(event: dict, context: dict, tool_summary: str) 
 
 def _summarize_tool_results(messages: list) -> str:
     """Flatten any ToolMessage contents from the classifier loop into a string."""
-    from langchain_core.messages import ToolMessage
-
     chunks: list[str] = []
     for m in messages:
         if isinstance(m, ToolMessage):
@@ -781,7 +780,6 @@ async def main() -> None:
             # may have been short, but the tracker still has data worth
             # reviewing (especially while iterating on prompt changes).
             print(cost_tracker.format_summary(), flush=True)
-            from pathlib import Path
             cost_tracker.append_to(
                 Path("data") / "runs.jsonl",
                 extra={"events_processed": processed, "group_id": GROUP_ID},
