@@ -62,6 +62,10 @@ _session = requests.Session()
 class LiveClientError(RuntimeError):
     """Base for client-level failures (network, 4xx/5xx, bad JSON)."""
 
+    def __init__(self, msg: str, *, status_code: int | None = None) -> None:
+        super().__init__(msg)
+        self.status_code = status_code
+
 
 class LiveGameNotStarted(LiveClientError):
     """Raised when play-by-play is requested for a game that hasn't tipped off.
@@ -79,7 +83,8 @@ def _get_json(url: str, *, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
         raise LiveClientError(f"network error fetching {url}: {e}") from e
     if resp.status_code != 200:
         raise LiveClientError(
-            f"HTTP {resp.status_code} from {url}: {resp.text[:200]!r}"
+            f"HTTP {resp.status_code} from {url}: {resp.text[:200]!r}",
+            status_code=resp.status_code,
         )
     try:
         return resp.json()
@@ -135,7 +140,7 @@ def fetch_playbyplay(
         # The CDN returns 403 specifically for not-yet-started games. Surface
         # that as a distinct exception so callers can handle it specially
         # (typically: wait and retry).
-        if "HTTP 403" in str(e):
+        if e.status_code == 403:
             raise LiveGameNotStarted(
                 f"game {game_id} has not started yet (no PBP file on CDN)"
             ) from e

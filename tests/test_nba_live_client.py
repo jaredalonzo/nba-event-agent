@@ -73,8 +73,9 @@ class TestFetchScoreboard:
     @patch("src.nba_live_client._session.get")
     def test_403_raises_client_error(self, mock_get: MagicMock) -> None:
         mock_get.return_value = _mock_response(403, text="Access Denied")
-        with pytest.raises(LiveClientError, match="HTTP 403"):
+        with pytest.raises(LiveClientError) as exc:
             fetch_scoreboard()
+        assert exc.value.status_code == 403
 
     @patch("src.nba_live_client._session.get")
     def test_network_error_raises_client_error(self, mock_get: MagicMock) -> None:
