@@ -43,7 +43,7 @@ _TIMEOUT = "timeout"
 # defer to the classifier regardless of margin (foul-trouble logic,
 # intentional fouling, etc.).
 _FREE_THROW = "free throw"
-_BLOWOUT_MARGIN_TOKENS = 15
+_BLOWOUT_MARGIN_POINTS = 15
 
 
 def should_skip(event: dict[str, Any], snapshot: dict[str, Any]) -> Action | None:
@@ -89,7 +89,7 @@ def should_skip(event: dict[str, Any], snapshot: dict[str, Any]) -> Action | Non
             int(snapshot.get("score_home") or 0)
             - int(snapshot.get("score_away") or 0)
         )
-        if margin > _BLOWOUT_MARGIN_TOKENS:
+        if margin > _BLOWOUT_MARGIN_POINTS:
             return Action.SKIPPED_ROUTINE
 
     return None
