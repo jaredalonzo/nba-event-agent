@@ -1,19 +1,4 @@
-"""Kafka consumer + LangGraph agent for NBA play-by-play events.
-
-Filled out across milestones:
-    M2: Consumer loop + GameContextTracker.
-    M3: Minimal LangGraph wired in (single classify_event node, always skip).
-    M4:           Agentic loop with real notability classifier.
-                  classify_event uses bound tools; ToolNode handles tool
-                  execution and loops back. A finalize node parses the
-                  classifier's final plain-text decision into an Action.
-    M5 (current): generate_insight node + send_alert tool + persistence.
-                  After classify_event returns ANALYZE, a separate LLM call
-                  produces a 2–3 sentence ESPN-style narrative. The result is
-                  emitted as a synthetic send_alert tool call, which the
-                  PERSIST_TOOLS ToolNode runs to append the insight to
-                  data/insights.jsonl.
-"""
+"""Kafka consumer + LangGraph agent for NBA play-by-play events."""
 
 from __future__ import annotations
 
