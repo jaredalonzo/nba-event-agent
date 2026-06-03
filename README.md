@@ -73,7 +73,8 @@ Routine free throws, substitutions, and early-quarter timeouts are skipped witho
 | Layer            | Tool                                                    |
 | ---------------- | ------------------------------------------------------- |
 | Agent framework  | `langgraph`, `langchain-anthropic`                      |
-| LLM              | Claude Sonnet 4.6 (`claude-sonnet-4-6`)                 |
+| LLM — classifier | Claude Haiku 4.5 (`claude-haiku-4-5`) — routes events, decides tool calls |
+| LLM — narrator   | Claude Sonnet 4.6 (`claude-sonnet-4-6`) — generates ESPN-voice narrative |
 | Kafka client     | `confluent-kafka` (librdkafka)                          |
 | Kafka runtime    | Confluent Platform 7.5 via Docker Compose               |
 | NBA data         | `nba_api` (`PlayByPlayV3` endpoint)                     |
