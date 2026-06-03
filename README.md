@@ -164,7 +164,7 @@ The agent prints classification decisions in real time and writes notable insigh
 | | `src/producer.py` (historical) | `src/producer_live.py` (live) |
 |---|---|---|
 | **Data source** | `nba_api.stats.endpoints.PlayByPlayV3` | `cdn.nba.com/static/json/liveData/*` |
-| **Game selection** | Set `NBA_GAME_ID` to any completed game | If `NBA_GAME_ID` is set: stream that game (must be in progress). If unset: auto-discover the first in-progress game on today's slate |
+| **Game selection** | Set `NBA_GAME_ID` to any completed game | Priority order: (1) `NBA_GAME_ID` set → stream that specific game; (2) `NBA_TEAM` set → find today's game for that tricode (e.g. `NYK`); (3) auto-discover the first in-progress game on today's slate |
 | **Pacing** | Configurable artificial delay (`PRODUCER_DELAY_SECONDS`) | Poll interval (`LIVE_POLL_SECONDS`, default 5s) — dictated by the game |
 | **Duration** | A few minutes (467 events × 0.5s) | A few hours (real game length) |
 | **Available when** | Any time | Only during the NBA season, when a game is actually on |
