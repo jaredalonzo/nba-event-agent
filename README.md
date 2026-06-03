@@ -105,7 +105,10 @@ nba-event-agent/
 │   ├── cost_log.py         # LangChain callback: tracks token usage + cost per model, appends to data/runs.jsonl
 │   └── mcp_server/
 │       └── server.py       # MCP: get_player_profile (career context)
-├── data/                   # insights.jsonl + player_profiles.json (gitignored)
+├── data/                   # gitignored runtime files
+│   ├── insights.jsonl      # one record per agent-generated insight
+│   ├── player_profiles.json # MCP career-context cache (populated on demand)
+│   └── runs.jsonl          # per-run token counts, cost, cache hit rate, duration
 └── tests/
 ```
 
