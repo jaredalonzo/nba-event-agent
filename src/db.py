@@ -75,6 +75,10 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
         await conn.execute(_CREATE_DECISIONS)
 
 
+def _s(v: Any) -> str | None:
+    return str(v) if v is not None else None
+
+
 async def upsert_play(pool: asyncpg.Pool, event: dict[str, Any]) -> None:
     try:
         await pool.execute(
@@ -86,10 +90,10 @@ async def upsert_play(pool: asyncpg.Pool, event: dict[str, Any]) -> None:
             event.get("description"),
             event.get("actionType"),
             event.get("subType"),
-            event.get("teamId"),
+            _s(event.get("teamId")),
             event.get("teamTricode"),
             event.get("location"),
-            event.get("personId"),
+            _s(event.get("personId")),
             event.get("playerName"),
             event.get("scoreHome"),
             event.get("scoreAway"),
@@ -127,10 +131,10 @@ async def persist_event_and_decision(
                     event.get("description"),
                     event.get("actionType"),
                     event.get("subType"),
-                    event.get("teamId"),
+                    _s(event.get("teamId")),
                     event.get("teamTricode"),
                     event.get("location"),
-                    event.get("personId"),
+                    _s(event.get("personId")),
                     event.get("playerName"),
                     event.get("scoreHome"),
                     event.get("scoreAway"),
