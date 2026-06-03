@@ -182,12 +182,18 @@ This appends a timestamp to the consumer group ID on each run, giving every run 
 ```json
 {
   "timestamp": "2026-05-20T20:14:11Z",
-  "game_id": "0041500407",
-  "period": 4,
-  "clock": "1:50",
-  "event": "LeBron James blocks Andre Iguodala's layup attempt",
   "severity": "critical",
-  "insight": "LeBron's chase-down block on Iguodala with under two minutes to play is the kind of defensive play that changes a championship. Cleveland trails by zero — the score's tied at 89 — and James has now logged 27 points, 11 rebounds, 11 assists tonight."
+  "insight": "LeBron's chase-down block on Iguodala with under two minutes to play is the kind of defensive play that changes a championship. Cleveland trails by zero — the score's tied at 89 — and James has now logged 27 points, 11 rebounds, 11 assists tonight.",
+  "event": {
+    "gameId": "0041500407",
+    "actionNumber": 412,
+    "period": 4,
+    "clock": "PT01M50.00S",
+    "description": "LeBron James blocks Andre Iguodala's layup attempt",
+    "playerName": "LeBron James",
+    "scoreHome": "89",
+    "scoreAway": "89"
+  }
 }
 ```
 
