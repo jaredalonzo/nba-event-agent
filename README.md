@@ -96,11 +96,13 @@ nba-event-agent/
 │   ├── producer.py         # nba_api → Kafka (historical)
 │   ├── producer_live.py    # cdn.nba.com → Kafka (live polling)
 │   ├── nba_live_client.py  # requests wrapper for the live CDN
+│   ├── prefilter.py        # deterministic pre-filter; skips ~40-50% of events before the LLM
 │   ├── agent.py            # LangGraph graph + async consumer; spawns MCP server
 │   ├── db.py               # asyncpg pool, schema bootstrap, upsert helpers
 │   ├── state.py            # AgentState TypedDict, Action enum
 │   ├── tools.py            # get_player_stats, analyze_momentum, send_alert
 │   ├── output.py           # Insight persistence
+│   ├── cost_log.py         # LangChain callback: tracks token usage + cost per model, appends to data/runs.jsonl
 │   └── mcp_server/
 │       └── server.py       # MCP: get_player_profile (career context)
 ├── data/                   # insights.jsonl + player_profiles.json (gitignored)
