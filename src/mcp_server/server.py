@@ -26,6 +26,7 @@ Run standalone for testing::
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -206,10 +207,14 @@ def get_player_profile(player_id: str) -> dict:
         ValueError: if ``player_id`` is unknown to nba_api.
     """
     if player_id in _cache:
+        name = _cache[player_id].get("name", player_id)
+        print(f"[mcp] get_player_profile: cache hit — {name} ({player_id})", file=sys.stderr, flush=True)
         return _cache[player_id]
+    print(f"[mcp] get_player_profile: fetching from nba_api — player_id={player_id}", file=sys.stderr, flush=True)
     profile = _fetch_profile(player_id)
     _cache[player_id] = profile
     _write_cache(_cache)
+    print(f"[mcp] get_player_profile: cached — {profile.get('name', player_id)}", file=sys.stderr, flush=True)
     return profile
 
 
