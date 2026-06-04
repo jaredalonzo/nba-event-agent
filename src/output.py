@@ -91,4 +91,7 @@ def log_insight(
     desc = event.get("description") or "(no description)"
     print(f"\n{badge}  {desc}\n            {insight}\n", flush=True)
 
+    from src.bluesky_poster import post_insight
+    post_insight(insight, sev, event)
+
     return record
