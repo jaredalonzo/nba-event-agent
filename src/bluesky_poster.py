@@ -15,7 +15,7 @@ from typing import Any
 _client = None  # lazy singleton; None means "not yet initialised or unavailable"
 
 _CLOCK_RE = re.compile(r"PT(\d+)M(\d+(?:\.\d+)?)S")
-_TAG = " #NBA"
+_TAG = " #NBA #NBAsky #NBAfinals"
 _LIMIT = 300
 
 
@@ -77,7 +77,7 @@ def post_insight(insight: str, severity: str, event: dict[str, Any]) -> None:
     No-ops silently when severity is not 'critical', credentials are absent,
     or the post call fails.
     """
-    if severity != "critical":
+    if severity not in {"critical", "notable"}:
         return
 
     client = _get_client()

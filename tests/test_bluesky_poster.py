@@ -58,9 +58,9 @@ class TestFormatPost:
         assert "2:34" in text
         assert "89-93" in text
 
-    def test_always_ends_with_nba_tag(self) -> None:
+    def test_always_ends_with_nba_tags(self) -> None:
         text = _format_post("Great play.", make_event())
-        assert text.endswith(" #NBA")
+        assert text.endswith(" #NBA #NBAsky #NBAfinals")
 
     def test_stays_within_300_chars(self) -> None:
         long_insight = "x" * 400
@@ -96,11 +96,16 @@ class TestFormatPost:
 
 
 class TestPostInsight:
-    def test_non_critical_severity_skips_post(self) -> None:
+    def test_routine_severity_skips_post(self) -> None:
         with patch("src.bluesky_poster._get_client") as mock_get:
-            post_insight("Insight.", "notable", make_event())
             post_insight("Insight.", "routine", make_event())
             mock_get.assert_not_called()
+
+    @pytest.mark.parametrize("severity", ["notable", "critical"])
+    def test_notable_and_critical_attempt_post(self, severity: str) -> None:
+        with patch("src.bluesky_poster._get_client", return_value=None) as mock_get:
+            post_insight("Insight.", severity, make_event())
+            mock_get.assert_called_once()
 
     def test_no_credentials_skips_post(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
