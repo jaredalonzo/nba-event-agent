@@ -44,8 +44,25 @@ def _format_post(insight: str, event: dict[str, Any]) -> str:
     header = "".join(header_parts) + "\n"
 
     max_body = _LIMIT - len(header) - len(_TAG)
-    body = insight if len(insight) <= max_body else insight[: max_body - 1] + "…"
+    body = insight if len(insight) <= max_body else _truncate(insight, max_body)
     return header + body + _TAG
+
+
+def _truncate(text: str, max_len: int) -> str:
+    """Shorten text to max_len graphemes, preferring clean sentence breaks."""
+    if len(text) <= max_len:
+        return text
+    # Try to end on a sentence boundary (keep the punctuation, drop trailing space)
+    for punct in (". ", "! ", "? "):
+        idx = text.rfind(punct, 0, max_len)
+        if idx != -1:
+            return text[: idx + 1]
+    # Fall back to the last word boundary
+    idx = text.rfind(" ", 0, max_len - 1)
+    if idx != -1:
+        return text[:idx] + "…"
+    # Hard truncate as last resort
+    return text[: max_len - 1] + "…"
 
 
 def _get_client():

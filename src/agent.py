@@ -409,6 +409,9 @@ Target distribution across a typical game: roughly 10% critical, 60% notable,
 30% routine. If you find yourself reaching for "critical" more than once or
 twice per quarter, you're miscalibrated — step down to "notable".
 
+Keep the narrative concise — aim for 250 characters or fewer so it fits
+cleanly in a social media post without truncation.
+
 Respond in EXACTLY this format, no preamble:
 
 SEVERITY: <critical|notable|routine>

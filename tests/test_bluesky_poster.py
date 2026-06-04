@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 import src.bluesky_poster as bp
-from src.bluesky_poster import _format_post, _parse_clock, post_insight
+from src.bluesky_poster import _format_post, _parse_clock, _truncate, post_insight
 
 
 @pytest.fixture(autouse=True)
@@ -48,6 +48,34 @@ class TestParseClock:
         assert _parse_clock("badclock") == "badclock"
 
 
+# --- _truncate ----------------------------------------------------------------
+
+
+class TestTruncate:
+    def test_short_text_returned_unchanged(self) -> None:
+        assert _truncate("Short.", 50) == "Short."
+
+    def test_sentence_boundary_preferred(self) -> None:
+        text = "First sentence. Second sentence that is too long to fit."
+        result = _truncate(text, 20)
+        assert result == "First sentence."
+
+    def test_exclamation_boundary(self) -> None:
+        text = "Great play! More text that overflows the limit here."
+        result = _truncate(text, 15)
+        assert result == "Great play!"
+
+    def test_word_boundary_fallback(self) -> None:
+        result = _truncate("no punctuation here overflow", 15)
+        assert result.endswith("…")
+        assert len(result) <= 15
+
+    def test_hard_truncate_last_resort(self) -> None:
+        result = _truncate("x" * 50, 10)
+        assert len(result) <= 10
+        assert result.endswith("…")
+
+
 # --- _format_post -------------------------------------------------------------
 
 
@@ -67,12 +95,19 @@ class TestFormatPost:
         text = _format_post(long_insight, make_event())
         assert len(text) <= 300
 
-    def test_truncated_insight_ends_with_ellipsis(self) -> None:
+    def test_truncated_insight_ends_with_ellipsis_when_no_sentence_break(self) -> None:
         long_insight = "x" * 400
         text = _format_post(long_insight, make_event())
-        # The body (between header and tag) should end with ellipsis
         body_and_tag = text.split("\n", 1)[1]
         assert "…" in body_and_tag
+
+    def test_truncated_insight_breaks_at_sentence_boundary(self) -> None:
+        # Craft an insight where a sentence boundary falls inside the budget
+        sentence = "LeBron hits the shot. " + "x" * 400
+        text = _format_post(sentence, make_event())
+        body_and_tag = text.split("\n", 1)[1]
+        assert body_and_tag.startswith("LeBron hits the shot.")
+        assert "…" not in body_and_tag
 
     def test_short_insight_not_truncated(self) -> None:
         insight = "Short insight."
