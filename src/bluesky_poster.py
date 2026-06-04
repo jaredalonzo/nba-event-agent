@@ -12,7 +12,8 @@ import os
 import re
 from typing import Any
 
-_client = None  # lazy singleton; None means "not yet initialised or unavailable"
+_client = None   # None = not yet attempted
+_FAILED = object()  # sentinel: login was attempted and permanently failed
 
 _CLOCK_RE = re.compile(r"PT(\d+)M(\d+(?:\.\d+)?)S")
 _TAG = " #NBA #NBAsky #NBAfinals"
@@ -66,8 +67,10 @@ def _truncate(text: str, max_len: int) -> str:
 
 
 def _get_client():
-    """Return a logged-in atproto Client, or None if credentials are absent."""
+    """Return a logged-in atproto Client, or None if credentials are absent/failed."""
     global _client
+    if _client is _FAILED:
+        return None
     if _client is not None:
         return _client
 
@@ -84,6 +87,7 @@ def _get_client():
         _client = c
         return _client
     except Exception as exc:  # noqa: BLE001
+        _client = _FAILED  # stop retrying for the lifetime of this process
         print(f"[bluesky] login failed: {exc}", flush=True)
         return None
 

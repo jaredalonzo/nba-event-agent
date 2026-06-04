@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 import src.bluesky_poster as bp
-from src.bluesky_poster import _format_post, _parse_clock, _truncate, post_insight
+from src.bluesky_poster import _FAILED, _format_post, _parse_clock, _truncate, post_insight
 
 
 @pytest.fixture(autouse=True)
@@ -199,6 +199,30 @@ class TestGetClient:
         assert result is None
         captured = capsys.readouterr()
         assert "[bluesky] login failed" in captured.out
+
+    def test_login_failure_sets_failed_sentinel(self) -> None:
+        mock_client = MagicMock()
+        mock_client.login.side_effect = RuntimeError("bad password")
+        with patch.dict(
+            "os.environ",
+            {"BLUESKY_HANDLE": "test.bsky.social", "BLUESKY_APP_PASSWORD": "wrong"},
+        ):
+            with patch("atproto.Client", return_value=mock_client):
+                bp._get_client()
+        assert bp._client is _FAILED
+
+    def test_no_retry_after_login_failure(self) -> None:
+        mock_client = MagicMock()
+        mock_client.login.side_effect = RuntimeError("bad password")
+        with patch.dict(
+            "os.environ",
+            {"BLUESKY_HANDLE": "test.bsky.social", "BLUESKY_APP_PASSWORD": "wrong"},
+        ):
+            with patch("atproto.Client", return_value=mock_client) as mock_cls:
+                bp._get_client()  # first call — fails, sets _FAILED
+                bp._get_client()  # second call — should short-circuit
+                bp._get_client()  # third call — should short-circuit
+                assert mock_cls.call_count == 1  # Client() only instantiated once
 
     def test_second_call_reuses_cached_client(self) -> None:
         mock_client = MagicMock()
