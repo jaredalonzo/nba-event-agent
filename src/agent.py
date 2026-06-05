@@ -679,13 +679,17 @@ async def main() -> None:
     _database_url = os.environ.get("DATABASE_URL", "").strip()
     db_pool: Any | None = None
     if _database_url:
-        try:
-            db_pool = await db_module.create_pool(_database_url)
-            await db_module.ensure_schema(db_pool)
-            print("[agent] postgres connected — plays and decisions will be persisted", flush=True)
-        except Exception as exc:
-            print(f"[agent] postgres unavailable, continuing without DB: {exc}", flush=True)
-            db_pool = None
+        for attempt in range(3):
+            try:
+                db_pool = await db_module.create_pool(_database_url)
+                await db_module.ensure_schema(db_pool)
+                print("[agent] postgres connected — plays and decisions will be persisted", flush=True)
+                break
+            except Exception as exc:
+                if attempt == 2:
+                    print(f"[agent] postgres unavailable after 3 attempts, continuing without DB: {exc}", flush=True)
+                else:
+                    await asyncio.sleep(2)
     consumer.subscribe([TOPIC])
 
     # One tracker per run; attached as a callback on both ChatAnthropic
