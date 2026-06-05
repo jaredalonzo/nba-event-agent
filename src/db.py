@@ -66,7 +66,12 @@ ON CONFLICT (game_id, action_number) DO UPDATE SET
 
 
 async def create_pool(database_url: str) -> asyncpg.Pool:
-    return await asyncpg.create_pool(database_url)
+    return await asyncpg.create_pool(
+        database_url,
+        min_size=1,
+        max_size=3,
+        max_inactive_connection_lifetime=300,
+    )
 
 
 async def ensure_schema(pool: asyncpg.Pool) -> None:
