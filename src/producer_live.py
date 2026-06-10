@@ -45,7 +45,6 @@ from src.nba_live_client import (
     extract_team_ids,
     fetch_playbyplay,
     fetch_scoreboard,
-    find_live_game,
 )
 
 # shell env wins over .env — lets inline overrides take effect
@@ -134,7 +133,7 @@ def resolve_game() -> dict[str, Any]:
         return _require_not_final(matches[0], f"team {EXPLICIT_TEAM}'s game")
 
     # Auto-discover: prefer in-progress, fall back to next scheduled game.
-    live = find_live_game()
+    live = next((g for g in games if g.get("gameStatus") == 2), None)
     if live is not None:
         return live
     scheduled = next(
