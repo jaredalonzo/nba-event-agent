@@ -253,7 +253,6 @@ def stream_game(
         try:
             pbp = fetch_playbyplay(game_id)
         except LiveGameNotStarted:
-            # Pre-tipoff — neither a success nor a failure for the counter.
             print(
                 "[producer] game not started yet; waiting for tipoff",
                 flush=True,
@@ -261,6 +260,12 @@ def stream_game(
             if current_status == 3:
                 print("[producer] game final; exiting", flush=True)
                 break
+            if cycle_failed:
+                consecutive_failures += 1
+                if consecutive_failures >= failure_budget:
+                    raise RuntimeError(
+                        f"exceeded failure budget ({failure_budget} consecutive scoreboard failures during pre-tipoff)"
+                    )
             time.sleep(poll_seconds)
             continue
         except LiveClientError as e:
