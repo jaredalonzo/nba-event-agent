@@ -688,6 +688,7 @@ async def main() -> None:
             except Exception as exc:
                 if attempt == 2:
                     print(f"[agent] postgres unavailable after 3 attempts, continuing without DB: {exc}", flush=True)
+                    db_pool = None
                 else:
                     await asyncio.sleep(2)
     consumer.subscribe([TOPIC])
