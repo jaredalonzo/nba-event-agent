@@ -259,6 +259,9 @@ def stream_game(
                 "[producer] game not started yet; waiting for tipoff",
                 flush=True,
             )
+            if current_status == 3:
+                print("[producer] game final; exiting", flush=True)
+                break
             time.sleep(poll_seconds)
             continue
         except LiveClientError as e:
