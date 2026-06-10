@@ -80,9 +80,11 @@ def _require_not_final(game: dict[str, Any], label: str) -> dict[str, Any]:
     if status == 2:
         return game
     if status == 1:
+        home = (game.get("homeTeam") or {}).get("teamTricode", "?")
+        away = (game.get("awayTeam") or {}).get("teamTricode", "?")
         print(
             f"[producer] {label} hasn't started yet "
-            f"({game.get('gameStatusText')}); will wait for tipoff",
+            f"({away} @ {home}, {game.get('gameStatusText')}); will wait for tipoff",
             flush=True,
         )
         return game
@@ -139,14 +141,8 @@ def resolve_game() -> dict[str, Any]:
         (g for g in games if g.get("gameStatus") == 1), None
     )
     if scheduled is not None:
-        home = (scheduled.get("homeTeam") or {}).get("teamTricode", "?")
-        away = (scheduled.get("awayTeam") or {}).get("teamTricode", "?")
-        print(
-            f"[producer] no live games; next up: {away} @ {home} "
-            f"({scheduled.get('gameStatusText')}); will wait for tipoff",
-            flush=True,
-        )
-        return scheduled
+        print("[producer] no live games on today's slate", flush=True)
+        return _require_not_final(scheduled, "next scheduled game")
     raise RuntimeError(
         "no in-progress or scheduled games on today's slate"
     )
