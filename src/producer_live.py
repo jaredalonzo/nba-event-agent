@@ -67,16 +67,23 @@ def _team_matches(game: dict[str, Any], tricode: str) -> bool:
     return tricode == home or tricode == away
 
 
-def _require_in_progress(game: dict[str, Any], label: str) -> dict[str, Any]:
-    """Return ``game`` if status=2, else raise with a status-aware message."""
+def _require_not_final(game: dict[str, Any], label: str) -> dict[str, Any]:
+    """Return ``game`` if status=1 or 2; raise if final or unknown.
+
+    Status=1 (scheduled) is allowed through — stream_game's poll loop already
+    handles pre-tipoff by catching LiveGameNotStarted and sleeping until the
+    PBP file appears on the CDN.
+    """
     status = game.get("gameStatus")
     if status == 2:
         return game
     if status == 1:
-        raise RuntimeError(
-            f"{label} hasn't started yet "
-            f"(status={status}, {game.get('gameStatusText')})"
+        print(
+            f"[producer] {label} hasn't started yet "
+            f"({game.get('gameStatusText')}); will wait for tipoff",
+            flush=True,
         )
+        return game
     if status == 3:
         raise RuntimeError(f"{label} is already final")
     raise RuntimeError(f"{label} has unexpected status: {status}")
@@ -100,7 +107,7 @@ def resolve_game() -> dict[str, Any]:
     if EXPLICIT_GAME_ID:
         for g in games:
             if g.get("gameId") == EXPLICIT_GAME_ID:
-                return _require_in_progress(g, f"game {EXPLICIT_GAME_ID}")
+                return _require_not_final(g, f"game {EXPLICIT_GAME_ID}")
         raise RuntimeError(
             f"game {EXPLICIT_GAME_ID} not in today's scoreboard"
         )
@@ -113,20 +120,31 @@ def resolve_game() -> dict[str, Any]:
             )
         # Same team could conceivably appear twice in a doubleheader scenario.
         # Prefer an in-progress game; else fall back to the first match so the
-        # caller gets the status-aware error from _require_in_progress.
+        # caller gets the status-aware error from _require_not_final.
         in_progress = next((g for g in matches if g.get("gameStatus") == 2), None)
         if in_progress is not None:
             return in_progress
-        return _require_in_progress(matches[0], f"team {EXPLICIT_TEAM}'s game")
+        return _require_not_final(matches[0], f"team {EXPLICIT_TEAM}'s game")
 
-    # Auto-discover
+    # Auto-discover: prefer in-progress, fall back to next scheduled game.
     live = find_live_game()
-    if live is None:
-        raise RuntimeError(
-            "no in-progress games on today's slate; set NBA_GAME_ID or "
-            "NBA_TEAM, or wait for tipoff"
+    if live is not None:
+        return live
+    scheduled = next(
+        (g for g in games if g.get("gameStatus") == 1), None
+    )
+    if scheduled is not None:
+        home = (scheduled.get("homeTeam") or {}).get("teamTricode", "?")
+        away = (scheduled.get("awayTeam") or {}).get("teamTricode", "?")
+        print(
+            f"[producer] no live games; next up: {away} @ {home} "
+            f"({scheduled.get('gameStatusText')}); will wait for tipoff",
+            flush=True,
         )
-    return live
+        return scheduled
+    raise RuntimeError(
+        "no in-progress or scheduled games on today's slate"
+    )
 
 
 # --- Adapter ---------------------------------------------------------------
