@@ -266,7 +266,7 @@ def stream_game(
                     raise RuntimeError(
                         f"exceeded failure budget ({failure_budget} consecutive scoreboard failures during pre-tipoff)"
                     )
-            time.sleep(poll_seconds)
+            time.sleep(min(poll_seconds * 10, 60))
             continue
         except LiveClientError as e:
             cycle_failed = True
