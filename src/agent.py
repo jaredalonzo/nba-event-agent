@@ -679,7 +679,7 @@ async def main() -> None:
     _database_url = os.environ.get("DATABASE_URL", "").strip()
     db_pool: Any | None = None
     if _database_url:
-        for attempt in range(3):
+        for attempt in range(15):  # 14 sleeps × 2s = 28s, covers postgres healthcheck worst case (25s)
             try:
                 db_pool = await db_module.create_pool(_database_url)
                 await db_module.ensure_schema(db_pool)
@@ -689,8 +689,8 @@ async def main() -> None:
                 if db_pool is not None:
                     await db_pool.close()
                     db_pool = None
-                if attempt == 2:
-                    print(f"[agent] postgres unavailable after 3 attempts, continuing without DB: {exc}", flush=True)
+                if attempt == 14:
+                    print(f"[agent] postgres unavailable after 15 attempts, continuing without DB: {exc}", flush=True)
                 else:
                     await asyncio.sleep(2)
     consumer.subscribe([TOPIC])
