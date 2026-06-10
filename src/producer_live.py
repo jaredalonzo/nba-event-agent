@@ -8,12 +8,14 @@ exits cleanly when the game ends.
 
 Three modes for selecting which game to stream, in priority order:
 
-    Explicit ID:  ``NBA_GAME_ID`` set to a game ID — must be in progress.
+    Explicit ID:  ``NBA_GAME_ID`` set to a game ID — in-progress or pre-tipoff;
+                  waits for tipoff if status=1, raises if already final.
     By team:      ``NBA_TEAM`` set to a tricode (e.g. ``NYK``) — finds today's
-                  game for that team; reports clear status if scheduled, in
-                  progress, or final.
-    Auto:         neither set — picks the first in-progress game from today's
-                  scoreboard; clear error if none are live.
+                  game for that team; waits for tipoff if scheduled, raises if
+                  final.
+    Auto:         neither set — prefers the first in-progress game; falls back
+                  to the next scheduled game and waits for tipoff; raises only
+                  if today's slate has no in-progress or scheduled games.
 
 Shape adapter: the live endpoint returns slightly different fields than the
 historical ``PlayByPlayV3``. Notably it lacks ``location`` ("h"/"v"). We inject
@@ -93,9 +95,12 @@ def resolve_game() -> dict[str, Any]:
     """Pick a game to stream.
 
     Priority:
-      1. ``NBA_GAME_ID`` — look up that specific game (must be in progress).
-      2. ``NBA_TEAM``   — find today's game for that team tricode.
-      3. Auto-discover — first in-progress game on today's slate.
+      1. ``NBA_GAME_ID`` — look up that specific game; waits for tipoff if
+         status=1, raises if already final.
+      2. ``NBA_TEAM``   — find today's game for that team tricode; waits for
+         tipoff if scheduled, raises if final.
+      3. Auto-discover — first in-progress game, then first scheduled game;
+         raises only if today's slate has neither.
 
     Raises ``RuntimeError`` if no usable game can be found — callers should
     print the message and exit.
