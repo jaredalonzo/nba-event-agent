@@ -297,6 +297,15 @@ def stream_game(
         else:
             consecutive_failures = 0
 
+        # Pre-game scoreboard entries (status=1) sometimes omit teamId. If IDs
+        # are still None after the initial extraction, re-resolve from the
+        # current cycle's scoreboard data (no extra HTTP request needed).
+        if (home_id is None or away_id is None) and current_games:
+            for g in current_games:
+                if g.get("gameId") == game_id:
+                    home_id, away_id = extract_team_ids(g)
+                    break
+
         _, actions = extract_actions(pbp)
         new_actions = [
             a for a in actions if a.get("actionNumber") not in seen_action_numbers
