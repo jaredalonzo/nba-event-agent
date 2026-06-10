@@ -351,7 +351,9 @@ def main() -> None:
         print(f"[producer] {e}", flush=True)
         raise SystemExit(1)
     finally:
-        producer.flush(timeout=10)
+        remaining = producer.flush(timeout=10)
+        if remaining > 0:
+            print(f"[producer] warning: {remaining} messages still queued after flush timeout — some plays may be lost", flush=True)
     print(f"[producer] done. {total} plays published to {TOPIC}.", flush=True)
 
 
