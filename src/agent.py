@@ -686,9 +686,11 @@ async def main() -> None:
                 print("[agent] postgres connected — plays and decisions will be persisted", flush=True)
                 break
             except Exception as exc:
+                if db_pool is not None:
+                    await db_pool.close()
+                    db_pool = None
                 if attempt == 2:
                     print(f"[agent] postgres unavailable after 3 attempts, continuing without DB: {exc}", flush=True)
-                    db_pool = None
                 else:
                     await asyncio.sleep(2)
     consumer.subscribe([TOPIC])
