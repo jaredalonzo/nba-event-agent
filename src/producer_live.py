@@ -229,13 +229,13 @@ def stream_game(
     failure_budget = 60
 
     while not stop.is_set():
-        cycle_failed = False
+        scoreboard_failed = False
 
         # 1) Check scoreboard for game-end. Cheap (single small JSON file).
         try:
             current_games = fetch_scoreboard()
         except LiveClientError as e:
-            cycle_failed = True
+            scoreboard_failed = True
             print(
                 f"[producer] scoreboard fetch failed "
                 f"({consecutive_failures + 1} consecutive): {e}",
@@ -260,7 +260,7 @@ def stream_game(
             if current_status == 3:
                 print("[producer] game final; exiting", flush=True)
                 break
-            if cycle_failed:
+            if scoreboard_failed:
                 consecutive_failures += 1
                 if consecutive_failures >= failure_budget:
                     raise RuntimeError(
@@ -269,7 +269,7 @@ def stream_game(
             time.sleep(min(poll_seconds * 10, 60))
             continue
         except LiveClientError as e:
-            cycle_failed = True
+            scoreboard_failed = True
             consecutive_failures += 1
             print(
                 f"[producer] pbp fetch failed "
@@ -288,7 +288,7 @@ def stream_game(
         # pbp succeeded. If scoreboard also succeeded this cycle, reset the
         # counter. If only scoreboard failed, account for that one failure
         # (so the budget can still fire on pure-scoreboard outages).
-        if cycle_failed:
+        if scoreboard_failed:
             consecutive_failures += 1
             if consecutive_failures >= failure_budget:
                 raise RuntimeError(
@@ -336,7 +336,7 @@ def stream_game(
             print("[producer] game final; exiting", flush=True)
             break
 
-        if cycle_failed:
+        if scoreboard_failed:
             # Scoreboard failed but pbp succeeded — apply backoff anyway
             # since we're in a degraded state.
             backoff = min(poll_seconds * (2 ** (consecutive_failures - 1)), max_backoff)
