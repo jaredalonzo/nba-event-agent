@@ -24,8 +24,8 @@ CREATE TABLE IF NOT EXISTS plays (
     location      TEXT,
     person_id     TEXT,
     player_name   TEXT,
-    score_home    TEXT,
-    score_away    TEXT,
+    score_home    SMALLINT,
+    score_away    SMALLINT,
     raw_event     JSONB NOT NULL,
     received_at   TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE (game_id, action_number)
@@ -84,6 +84,13 @@ def _s(v: Any) -> str | None:
     return str(v) if v is not None else None
 
 
+def _parse_score(val: Any) -> int | None:
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
 async def upsert_play(pool: asyncpg.Pool, event: dict[str, Any]) -> None:
     try:
         await pool.execute(
@@ -100,8 +107,8 @@ async def upsert_play(pool: asyncpg.Pool, event: dict[str, Any]) -> None:
             event.get("location"),
             _s(event.get("personId")),
             event.get("playerName"),
-            event.get("scoreHome"),
-            event.get("scoreAway"),
+            _parse_score(event.get("scoreHome")),
+            _parse_score(event.get("scoreAway")),
             json.dumps(event),
         )
     except Exception:
