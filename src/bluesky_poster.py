@@ -91,7 +91,7 @@ def _get_client():
         return _client
     except Exception as exc:  # noqa: BLE001
         _client = _FAILED  # stop retrying for the lifetime of this process
-        print(f"[bluesky] login failed: {exc}", flush=True)
+        print(f"[bluesky] login failed: {type(exc).__name__}", flush=True)
         return None
 
 
