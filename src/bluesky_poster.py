@@ -10,14 +10,17 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from typing import Any
 
 _client = None   # None = not yet attempted
 _FAILED = object()  # sentinel: login was attempted and permanently failed
+_last_post_time: float = 0.0  # monotonic timestamp of the last successful post
 
 _CLOCK_RE = re.compile(r"PT(\d+)M(\d+(?:\.\d+)?)S")
 _TAG = " #NBA #NBAsky #NBAfinals"
 _LIMIT = 300
+_MIN_POST_INTERVAL = 30.0  # seconds between posts; Bluesky allows ~1,666/hour
 
 
 def _parse_clock(clock: str) -> str:
@@ -98,6 +101,8 @@ def post_insight(insight: str, severity: str, event: dict[str, Any]) -> None:
     No-ops silently when severity is not 'critical', credentials are absent,
     or the post call fails.
     """
+    global _last_post_time
+
     if severity not in {"critical", "notable"}:
         return
 
@@ -105,8 +110,18 @@ def post_insight(insight: str, severity: str, event: dict[str, Any]) -> None:
     if client is None:
         return
 
+    elapsed = time.monotonic() - _last_post_time
+    if elapsed < _MIN_POST_INTERVAL:
+        print(
+            f"[bluesky] rate limit: skipping post ({elapsed:.1f}s since last post, "
+            f"min={_MIN_POST_INTERVAL}s)",
+            flush=True,
+        )
+        return
+
     try:
         text = _format_post(insight, event)
         client.send_post(text=text)
+        _last_post_time = time.monotonic()
     except Exception as exc:  # noqa: BLE001
         print(f"[bluesky] post failed: {exc}", flush=True)
