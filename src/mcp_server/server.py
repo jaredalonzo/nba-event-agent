@@ -97,7 +97,7 @@ def _fetch_profile(player_id: str) -> dict[str, Any]:
         # unknown player IDs, and the nba_api library surfaces that as a raw
         # KeyError. Translate to a clean ValueError so the MCP client sees a
         # structured failure rather than a leaky implementation detail.
-        if "resultSet" in str(e):
+        if e.args and e.args[0] == "resultSet":
             raise ValueError(f"unknown player_id: {player_id}") from e
         raise
     if not info_rows:
