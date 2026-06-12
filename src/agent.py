@@ -535,6 +535,22 @@ def generate_insight(state: AgentState) -> dict:
     }
 
 
+def notify(state: AgentState) -> dict:
+    """Post the insight to downstream notification channels (e.g. Bluesky).
+
+    Runs after send_alert so output.py stays a pure persistence layer. Any
+    future integrations (Slack, webhooks) belong here, not in output.py.
+    """
+    from src.bluesky_poster import post_insight
+
+    insight = state.get("insight") or ""
+    severity = state.get("severity") or ""
+    event = state.get("event") or {}
+    if insight and severity:
+        post_insight(insight, severity, event)
+    return {}
+
+
 def build_graph(data_tools: list[BaseTool] | None = None):
     """Compile the LangGraph for the NBA agent.
 
@@ -548,7 +564,7 @@ def build_graph(data_tools: list[BaseTool] | None = None):
                               ▼                │
             START → classify_event → call_tools
                       │
-                      ├─ ANALYZE → generate_insight → send_alert (ToolNode) → END
+                      ├─ ANALYZE → generate_insight → send_alert (ToolNode) → notify → END
                       │
                       └─ SKIP_*  → finalize → END
     """
@@ -558,6 +574,7 @@ def build_graph(data_tools: list[BaseTool] | None = None):
     g.add_node("call_tools", ToolNode(tools))
     g.add_node("generate_insight", generate_insight)
     g.add_node("send_alert", ToolNode(PERSIST_TOOLS))
+    g.add_node("notify", notify)
     g.add_node("finalize", finalize)
 
     g.add_edge(START, "classify_event")
@@ -572,7 +589,8 @@ def build_graph(data_tools: list[BaseTool] | None = None):
     )
     g.add_edge("call_tools", "classify_event")
     g.add_edge("generate_insight", "send_alert")
-    g.add_edge("send_alert", END)
+    g.add_edge("send_alert", "notify")
+    g.add_edge("notify", END)
     g.add_edge("finalize", END)
     return g.compile()
 
