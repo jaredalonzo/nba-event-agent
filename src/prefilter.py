@@ -21,6 +21,13 @@ from typing import Any
 
 from src.state import Action
 
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 # Substitutions are always routine — no game-state implication, no
 # narrative content. The classifier's system prompt already lists them
 # as a skip case; we just save the round-trip.
@@ -73,7 +80,7 @@ def should_skip(event: dict[str, Any], snapshot: dict[str, Any]) -> Action | Non
     if action_type in _MARKER_ACTION_TYPES:
         return Action.SKIPPED_OTHER
 
-    period = int(snapshot.get("period") or 0)
+    period = _coerce_int(snapshot.get("period"))
 
     # Rule 3: timeouts in Q1 or Q2 — SKIPPED_EARLY_Q. Q3+ goes to the
     # classifier because timeouts there can carry narrative weight.
@@ -86,8 +93,8 @@ def should_skip(event: dict[str, Any], snapshot: dict[str, Any]) -> Action | Non
     # might be closing exactly because of them).
     if action_type == _FREE_THROW and period < 4:
         margin = abs(
-            int(snapshot.get("score_home") or 0)
-            - int(snapshot.get("score_away") or 0)
+            _coerce_int(snapshot.get("score_home"))
+            - _coerce_int(snapshot.get("score_away"))
         )
         if margin > _BLOWOUT_MARGIN_POINTS:
             return Action.SKIPPED_ROUTINE
