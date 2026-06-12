@@ -59,7 +59,7 @@ def parse_clock(pt: str | None) -> str:
     body = pt[2:]
     minutes, _, rest = body.partition("M")
     seconds = rest.rstrip("S") or "0"
-    return f"{int(minutes)}:{int(float(seconds)):02d}"
+    return f"{int(minutes)}:{round(float(seconds)):02d}"
 
 
 @dataclass
