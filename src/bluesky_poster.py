@@ -24,10 +24,10 @@ _MIN_POST_INTERVAL = 30.0  # seconds between posts; Bluesky allows ~1,666/hour
 
 
 def _parse_clock(clock: str) -> str:
-    """Convert ISO 8601 duration 'PT02M34.00S' to '2:34'."""
+    """Convert ISO 8601 duration 'PT02M34.00S' to '2:34', or '' on no-match."""
     m = _CLOCK_RE.match(clock)
     if not m:
-        return clock
+        return ""
     minutes = int(m.group(1))
     seconds = int(float(m.group(2)))
     return f"{minutes}:{seconds:02d}"
@@ -41,8 +41,9 @@ def _format_post(insight: str, event: dict[str, Any]) -> str:
     score_away = event.get("scoreAway", "")
 
     header_parts: list[str] = ["🏀"]
-    if period and clock_raw:
-        header_parts.append(f" Q{period} {_parse_clock(clock_raw)}")
+    clock = _parse_clock(clock_raw) if clock_raw else ""
+    if period and clock:
+        header_parts.append(f" Q{period} {clock}")
     if score_home and score_away:
         header_parts.append(f" | {score_home}-{score_away}")
     header = "".join(header_parts) + "\n"
