@@ -78,6 +78,21 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(_CREATE_PLAYS)
         await conn.execute(_CREATE_DECISIONS)
+        # Migrate score columns from TEXT → SMALLINT if the table was created
+        # before the schema declared them as SMALLINT.
+        await conn.execute("""
+            DO $$ BEGIN
+                IF (SELECT data_type FROM information_schema.columns
+                    WHERE table_name = 'plays' AND column_name = 'score_home') = 'text'
+                THEN
+                    ALTER TABLE plays
+                        ALTER COLUMN score_home TYPE SMALLINT
+                            USING NULLIF(score_home, '')::SMALLINT,
+                        ALTER COLUMN score_away TYPE SMALLINT
+                            USING NULLIF(score_away, '')::SMALLINT;
+                END IF;
+            END $$;
+        """)
 
 
 def _s(v: Any) -> str | None:
@@ -148,8 +163,8 @@ async def persist_event_and_decision(
                     event.get("location"),
                     _s(event.get("personId")),
                     event.get("playerName"),
-                    event.get("scoreHome"),
-                    event.get("scoreAway"),
+                    _parse_score(event.get("scoreHome")),
+                    _parse_score(event.get("scoreAway")),
                     json.dumps(event),
                 )
                 await conn.execute(
