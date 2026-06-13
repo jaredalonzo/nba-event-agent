@@ -236,13 +236,42 @@ The MCP-bridged tool is async-only — `langchain-mcp-adapters` wraps it as a La
 
 ---
 
+## Observability
+
+The agent ships with optional [LangSmith](https://smith.langchain.com) tracing. When enabled, every graph invocation — `classify_event → call_tools → generate_insight → send_alert` — is captured as a traced run, so you can inspect which plays were flagged, what tool calls were made, and exactly how each insight was generated.
+
+### Setup
+
+1. Sign up at [smith.langchain.com](https://smith.langchain.com) and create an API key.
+2. In your `.env`, set:
+
+```bash
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_API_KEY=<your-key>
+LANGCHAIN_PROJECT=nba-agent   # groups runs under this project name
+```
+
+3. Run the agent as normal — traces appear in the LangSmith UI automatically.
+
+### What gets tagged
+
+Each run is tagged with `game_id`, `period`, and `action_number` metadata, so you can filter in the LangSmith UI to a specific game or quarter. For example, to find all Q4 events from a specific game:
+
+```
+metadata.game_id = "0041500407" AND metadata.period = 4
+```
+
+No code changes are needed to toggle tracing on or off — it's entirely controlled by the `LANGCHAIN_TRACING_V2` environment variable.
+
+---
+
 ## Roadmap
 
 Beyond the current scope:
 
 - ~~Swap simulated play-by-play for a live WebSocket feed~~ — done as polling against `cdn.nba.com/static/json/liveData/*` (see `src/producer_live.py`)
 - ~~Add an MCP server tool (`get_player_profile`) to demonstrate MCP + LangGraph integration~~ — done
-- LangSmith tracing for observability
+- ~~LangSmith tracing for observability~~ — done (see Observability section above)
 - FastAPI endpoint exposing the insight stream
 - ~~PostgreSQL persistence for raw plays + agent decisions~~ — done (`src/db.py`, `asyncpg`, postgres service in Docker Compose)
 - ~~Apache Flink as a stream processing layer~~ — evaluated and deferred; LLM latency is the bottleneck, not throughput. Worth revisiting at 10+ simultaneous games or if the project moves to the JVM.

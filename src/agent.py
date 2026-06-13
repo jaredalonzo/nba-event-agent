@@ -862,7 +862,17 @@ async def _process_event(
         "insight": None,
         "severity": None,
     }
-    final_state = await _graph.ainvoke(initial_state)
+    # Metadata is picked up by LangSmith when LANGCHAIN_TRACING_V2=true,
+    # making runs filterable by game and period in the LangSmith UI.
+    trace_config = {
+        "run_name": f"game_{_game_id}_play_{_action_number}",
+        "metadata": {
+            "game_id": _game_id,
+            "period": snapshot["period"],
+            "action_number": _action_number,
+        },
+    }
+    final_state = await _graph.ainvoke(initial_state, config=trace_config)
     action = final_state["action"]
     severity = final_state.get("severity")
 
