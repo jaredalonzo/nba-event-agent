@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import os
 import signal
@@ -28,6 +29,7 @@ from src import db as db_module
 from src.cost_log import CostTracker
 from src.prefilter import should_skip
 from src.state import Action, AgentState
+from src.team_context import team_context_provider
 from src.tools import AGENT_TOOLS, PERSIST_TOOLS
 
 # shell env wins over .env — lets inline overrides take effect
@@ -418,7 +420,9 @@ INSIGHT: <2–3 sentence narrative>
 """
 
 
-def _build_narrator_user_message(event: dict, context: dict, tool_summary: str) -> str:
+def _build_narrator_user_message(
+    event: dict, context: dict, tool_summary: str, grounding: str = ""
+) -> str:
     """Compact user-side prompt for the narrator. Includes any tool results."""
     home = context.get("home_team") or "HOME"
     away = context.get("away_team") or "AWAY"
@@ -432,6 +436,8 @@ def _build_narrator_user_message(event: dict, context: dict, tool_summary: str) 
         f"Period: Q{context.get('period')}  Clock: {context.get('clock')}\n"
         f"Score: {score_line}\n"
     )
+    if grounding:
+        base += f"\nTeam context (authoritative):\n{grounding}\n"
     if tool_summary:
         base += f"\nGathered context:\n{tool_summary}\n"
     return base
@@ -481,6 +487,33 @@ def _parse_narrator_response(text: str) -> tuple[str, str]:
     return severity, insight
 
 
+def _build_grounding_block(context: dict) -> str:
+    """Fetch home + away team context and format a compact grounding string.
+
+    Non-optional: called on every analyze path so the narrator never has to
+    assert coach/roster facts from training-data priors. If the provider is
+    unavailable (nba_api down, not yet implemented), we log and return empty
+    rather than dropping the insight entirely.
+    """
+    game_date = datetime.date.today().isoformat()
+    lines: list[str] = []
+    for side, tricode_key in (("Home", "home_team"), ("Away", "away_team")):
+        tricode = context.get(tricode_key, "")
+        try:
+            ctx = team_context_provider.get(tricode, game_date)
+        except Exception as exc:
+            print(f"[agent] team_context unavailable for {tricode}: {exc}", flush=True)
+            continue
+        if not ctx:
+            continue
+        coach = ctx.get("coach", "unknown coach")
+        record = ctx.get("record", "?-?")
+        seed = ctx.get("seed")
+        seed_str = f", seed {seed}" if seed else ""
+        lines.append(f"{side}: {tricode} (coach: {coach}, {record}{seed_str})")
+    return "\n".join(lines)
+
+
 def generate_insight(state: AgentState) -> dict:
     """Second LLM pass: turn classifier context into an ESPN-style narrative.
 
@@ -490,6 +523,7 @@ def generate_insight(state: AgentState) -> dict:
     event = state["event"]
     context = state["game_context"]
     tool_summary = _summarize_tool_results(state.get("messages", []))
+    grounding = _build_grounding_block(context)
 
     messages = [
         # Same caching pattern as classify_event. INSIGHT_SYSTEM_PROMPT is
@@ -507,7 +541,7 @@ def generate_insight(state: AgentState) -> dict:
             ]
         ),
         HumanMessage(
-            content=_build_narrator_user_message(event, context, tool_summary)
+            content=_build_narrator_user_message(event, context, tool_summary, grounding)
         ),
     ]
     response = _narrator.invoke(messages)
@@ -531,6 +565,7 @@ def generate_insight(state: AgentState) -> dict:
         "insight": insight,
         "severity": severity,
         "action": Action.ANALYZED,
+        "team_context": {"home": context.get("home_team"), "away": context.get("away_team")},
         "messages": [persist_call],
     }
 
@@ -861,6 +896,7 @@ async def _process_event(
         "action": Action.SKIPPED_OTHER,
         "insight": None,
         "severity": None,
+        "team_context": None,
     }
     # Metadata is picked up by LangSmith when LANGCHAIN_TRACING_V2=true,
     # making runs filterable by game and period in the LangSmith UI.

@@ -47,3 +47,4 @@ class AgentState(TypedDict):
     action: Action
     insight: str | None
     severity: str | None
+    team_context: dict | None

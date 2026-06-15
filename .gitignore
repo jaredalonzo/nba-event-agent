@@ -22,3 +22,6 @@ data/*.json*
 
 # Claude Code worktrees (spawned for parallel agent runs)
 .claude/
+
+# misc
+reference_grounding.md

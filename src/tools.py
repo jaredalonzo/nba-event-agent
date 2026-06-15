@@ -19,6 +19,7 @@ deployment we'd compute deltas from a live box-score feed.
 
 from __future__ import annotations
 
+import datetime
 import math
 from typing import Annotated, Any
 
@@ -27,6 +28,7 @@ from langgraph.prebuilt import InjectedState
 from nba_api.stats.endpoints import boxscoretraditionalv3
 
 from src.output import log_insight
+from src.team_context import team_context_provider
 
 
 # Module-level cache: (game_id, player_id) -> stats dict. The demo replays a
@@ -185,9 +187,29 @@ def send_alert(
     return {"persisted": True, "severity": record["severity"]}
 
 
+@tool
+def get_team_context(team_tricode: str) -> dict:
+    """Fetch current-season context for a team (coach, record, seed, roster).
+
+    Use this when standings or roster context would meaningfully affect
+    classification: checking if a team is in a playoff race, confirming a
+    player is still on the roster, or adding color around a team's season arc.
+    The injection path in generate_insight already guarantees the baseline
+    grounding — this tool is for opt-in depth the classifier explicitly wants.
+
+    Args:
+        team_tricode: Three-letter team abbreviation, e.g. "LAL", "GSW".
+
+    Returns:
+        dict with: coach, record, seed, roster {player_id: name}
+    """
+    game_date = datetime.date.today().isoformat()
+    return team_context_provider.get(team_tricode, game_date)
+
+
 # Tools the *classifier* binds to. send_alert is intentionally excluded — it
 # is invoked by the graph after generate_insight, not chosen by the classifier.
-AGENT_TOOLS = [get_player_stats, analyze_momentum]
+AGENT_TOOLS = [get_player_stats, analyze_momentum, get_team_context]
 
 # Tools the graph wires through a dedicated ToolNode after generate_insight.
 PERSIST_TOOLS = [send_alert]
