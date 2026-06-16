@@ -18,6 +18,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from nba_api.stats.endpoints import commonteamroster, leaguestandingsv3
+from nba_api.stats.static import teams as nba_teams_static
+
 _CACHE_PATH = Path(__file__).resolve().parent.parent / "data" / "team_context.json"
 _TTL_HOURS = 24
 
@@ -76,12 +79,38 @@ class TeamContextProvider:
         """Fetch fresh team context from nba_api.
 
         Two calls:
-          1. leaguestandingsv3 → record, seed, team_id (from TeamAbbreviation lookup)
-          2. commonteamroster(team_id) → head coach + active roster
+          1. leaguestandingsv3 → Record + PlayoffRank for this team
+          2. commonteamroster(team_id) → head coach (COACH_TYPE="Head Coach") + roster
 
-        TODO: implement
+        team_id resolution uses the static teams table — no extra API call.
+        Note: IS_ASSISTANT is unreliable (=1 even for head coaches); filter
+        by COACH_TYPE instead.
         """
-        raise NotImplementedError
+        team_info = nba_teams_static.find_team_by_abbreviation(team_tricode)
+        if not team_info:
+            return {"coach": None, "record": None, "seed": None, "roster": {}}
+        team_id = team_info["id"]
+
+        # --- standings: record + seed ---
+        standings = leaguestandingsv3.LeagueStandingsV3().get_normalized_dict().get("Standings", [])
+        team_row = next((r for r in standings if r["TeamID"] == team_id), None)
+        record = team_row["Record"] if team_row else None
+        seed = team_row["PlayoffRank"] if team_row else None
+
+        # --- roster + head coach ---
+        roster_data = commonteamroster.CommonTeamRoster(team_id=str(team_id)).get_normalized_dict()
+
+        roster = {
+            str(p["PLAYER_ID"]): p["PLAYER"]
+            for p in roster_data.get("CommonTeamRoster", [])
+            if p.get("PLAYER_ID") and p.get("PLAYER")
+        }
+
+        coaches = roster_data.get("Coaches", [])
+        head_coach = next((c for c in coaches if c.get("COACH_TYPE") == "Head Coach"), None)
+        coach = head_coach["COACH_NAME"] if head_coach else None
+
+        return {"coach": coach, "record": record, "seed": seed, "roster": roster}
 
 
 def _is_fresh(entry: dict) -> bool:
