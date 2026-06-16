@@ -481,13 +481,15 @@ class TestSummarizeToolResults:
 
 
 class TestGenerateInsight:
+    @patch("src.agent.team_context_provider")
     @patch("src.agent._narrator")
     def test_returns_insight_severity_and_action(
-        self, mock_narrator: MagicMock
+        self, mock_narrator: MagicMock, mock_provider: MagicMock
     ) -> None:
         mock_narrator.invoke.return_value = AIMessage(
             content="SEVERITY: critical\nINSIGHT: LeBron ties it at 89."
         )
+        mock_provider.get.return_value = {}
 
         state = make_state(
             event={
@@ -511,13 +513,17 @@ class TestGenerateInsight:
         assert result["severity"] == "critical"
         assert "LeBron" in result["insight"]
 
+    @patch("src.agent.team_context_provider")
     @patch("src.agent._narrator")
-    def test_emits_send_alert_tool_call(self, mock_narrator: MagicMock) -> None:
+    def test_emits_send_alert_tool_call(
+        self, mock_narrator: MagicMock, mock_provider: MagicMock
+    ) -> None:
         # The graph relies on generate_insight returning an AIMessage with a
         # send_alert tool_call so the downstream ToolNode can persist.
         mock_narrator.invoke.return_value = AIMessage(
             content="SEVERITY: notable\nINSIGHT: A solid run by Cleveland."
         )
+        mock_provider.get.return_value = {}
         state = make_state()
 
         result = generate_insight(state)
@@ -533,15 +539,17 @@ class TestGenerateInsight:
         assert "Cleveland" in tc["args"]["insight"]
         assert tc.get("id"), "tool_call must have an id for ToolNode matching"
 
+    @patch("src.agent.team_context_provider")
     @patch("src.agent._narrator")
     def test_passes_tool_results_to_narrator(
-        self, mock_narrator: MagicMock
+        self, mock_narrator: MagicMock, mock_provider: MagicMock
     ) -> None:
         # When the classifier gathered context via tools, generate_insight
         # should fold those tool results into the narrator's user prompt.
         mock_narrator.invoke.return_value = AIMessage(
             content="SEVERITY: notable\nINSIGHT: stub"
         )
+        mock_provider.get.return_value = {}
         state = make_state(
             messages=[
                 ToolMessage(
@@ -559,6 +567,60 @@ class TestGenerateInsight:
         user_content = sent_messages[1].content
         assert "27" in user_content
         assert "get_player_stats" in user_content
+
+    @patch("src.agent.team_context_provider")
+    @patch("src.agent._narrator")
+    def test_grounding_block_appears_in_narrator_prompt(
+        self, mock_narrator: MagicMock, mock_provider: MagicMock
+    ) -> None:
+        mock_narrator.invoke.return_value = AIMessage(
+            content="SEVERITY: notable\nINSIGHT: stub"
+        )
+        mock_provider.get.return_value = {
+            "coach": "JJ Redick",
+            "record": "53-29",
+            "seed": 4,
+            "roster": {},
+        }
+        state = make_state(
+            game_context={
+                "period": 4,
+                "clock": "2:00",
+                "score_home": 89,
+                "score_away": 87,
+                "home_team": "LAL",
+                "away_team": "GSW",
+            }
+        )
+
+        generate_insight(state)
+
+        sent_messages = mock_narrator.invoke.call_args[0][0]
+        user_content = sent_messages[1].content
+        assert "JJ Redick" in user_content
+        assert "53-29" in user_content
+        # Both teams should appear
+        assert "LAL" in user_content
+        assert "GSW" in user_content
+
+    @patch("src.agent.team_context_provider")
+    @patch("src.agent._narrator")
+    def test_provider_error_does_not_drop_insight(
+        self, mock_narrator: MagicMock, mock_provider: MagicMock
+    ) -> None:
+        # If the team context provider is unavailable, the insight should
+        # still be generated — grounding failure must not kill the event.
+        mock_narrator.invoke.return_value = AIMessage(
+            content="SEVERITY: notable\nINSIGHT: Curry drains a three."
+        )
+        mock_provider.get.side_effect = Exception("nba_api down")
+        state = make_state()
+
+        result = generate_insight(state)
+
+        assert result["insight"] == "Curry drains a three."
+        assert result["severity"] == "notable"
+        assert result["action"] == Action.ANALYZED
 
 
 # --- _process_event dedup --------------------------------------------------

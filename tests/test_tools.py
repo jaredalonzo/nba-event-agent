@@ -16,7 +16,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.tools import _stats_cache, analyze_momentum, get_player_stats, send_alert
+import datetime
+
+from src.tools import _stats_cache, analyze_momentum, get_player_stats, get_team_context, send_alert
 
 
 @pytest.fixture(autouse=True)
@@ -275,3 +277,38 @@ class TestSendAlert:
         args, _ = mock_log.call_args
         assert args[2] == {}
         assert result["persisted"] is True
+
+
+# --- get_team_context --------------------------------------------------------
+
+
+class TestGetTeamContext:
+    @patch("src.tools.team_context_provider")
+    def test_delegates_to_provider_with_today_date(
+        self, mock_provider: MagicMock
+    ) -> None:
+        mock_provider.get.return_value = {
+            "coach": "JJ Redick",
+            "record": "53-29",
+            "seed": 4,
+            "roster": {"2544": "LeBron James"},
+        }
+
+        result = get_team_context.invoke({"team_tricode": "LAL"})
+
+        mock_provider.get.assert_called_once()
+        tricode_arg, date_arg = mock_provider.get.call_args[0]
+        assert tricode_arg == "LAL"
+        assert date_arg == datetime.date.today().isoformat()
+        assert result["coach"] == "JJ Redick"
+
+    @patch("src.tools.team_context_provider")
+    def test_returns_provider_result_unchanged(
+        self, mock_provider: MagicMock
+    ) -> None:
+        expected = {"coach": "Steve Kerr", "record": "37-45", "seed": 10, "roster": {}}
+        mock_provider.get.return_value = expected
+
+        result = get_team_context.invoke({"team_tricode": "GSW"})
+
+        assert result == expected
