@@ -219,7 +219,7 @@ SKIP routine events that don't need narrative:
 - Timeouts in early quarters (Q1, Q2)
 - Rebounds, missed shots, or jump balls with no game-state implication
 
-You have three tools available:
+You have four tools available:
 - get_player_stats(player_id, game_id): the player's CURRENT-GAME box-score line
   (points, rebounds, assists, +/- in this game). Use this when you need to
   know how the player is performing right now.
@@ -231,6 +231,12 @@ You have three tools available:
   a signature moment, a former #1 pick rising to the occasion, or a returning
   player playing against a previous team. Do NOT call it for routine notable
   plays where current-game stats are enough.
+- get_team_context(team_tricode): CURRENT-SEASON team context — head coach,
+  win-loss record, playoff seed, and active roster. The narrator always gets
+  the baseline (coach + record) injected automatically, so call this only when
+  the fuller picture would change your classification: e.g. a team in a tight
+  playoff race where the record matters, or verifying a player is still on the
+  roster after a rumored trade. Use it sparingly — most events don't need it.
 
 Use tools only when needed. For obviously routine events, skip without
 calling any tools. For potentially notable events, gather just enough context
