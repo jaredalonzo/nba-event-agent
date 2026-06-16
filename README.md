@@ -24,13 +24,15 @@ Simulated play-by-play (nba_api)
    Kafka topic: nba.plays
         ↓
    Consumer + LangGraph agent ──► MCP subprocess (career profile)
-        ↓               ↓
+        ↓               ↓          TeamContextProvider (grounding)
    data/insights.jsonl  PostgreSQL (plays + agent decisions)
 ```
 
 The consumer maintains a stateful `GameContextTracker` keyed by game ID — running score, quarter, time, last five scoring plays, per-player foul counts — folded across the event stream. Before each graph invocation, it attaches a fresh snapshot to the agent state. The graph itself is stateless across events.
 
 At startup the agent spawns a separate MCP subprocess that exposes one tool, `get_player_profile`, for career-level context. The classifier sees it alongside the local tools and decides on its own when to reach for it (see [MCP integration](#mcp-integration) below).
+
+Before every `generate_insight` call, a `TeamContextProvider` fetches the current head coach, win-loss record, playoff seed, and active roster for both teams from `nba_api` and injects them into the narrator prompt as an authoritative grounding block — so the model never has to assert coach or roster facts from training-data priors (see [Reference grounding](#reference-grounding) below).
 
 ### The agent loop
 
@@ -42,8 +44,9 @@ At startup the agent spawns a separate MCP subprocess that exposes one tool, `ge
    │   tool_calls  plain text    plain text + intent="analyze"
    │      ↓        ↓             ↓
    └── call_tools  [END]         generate_insight (node, LLM call)
-       (get_player_stats,           ↓
-        analyze_momentum,         send_alert (tool)
+       (get_player_stats,         [grounding injected here]
+        analyze_momentum,           ↓
+        get_team_context,         send_alert (tool)
         get_player_profile)         ↓
                                   [END]
 ```
@@ -100,14 +103,16 @@ nba-event-agent/
 │   ├── agent.py            # LangGraph graph + async consumer; spawns MCP server
 │   ├── db.py               # asyncpg pool, schema bootstrap, upsert helpers
 │   ├── state.py            # AgentState TypedDict, Action enum
-│   ├── tools.py            # get_player_stats, analyze_momentum, send_alert
+│   ├── tools.py            # get_player_stats, analyze_momentum, get_team_context, send_alert
+│   ├── team_context.py     # TeamContextProvider: coach/record/roster, 24h TTL cache
 │   ├── output.py           # Insight persistence
 │   ├── cost_log.py         # LangChain callback: tracks token usage + cost per model, appends to data/runs.jsonl
 │   └── mcp_server/
 │       └── server.py       # MCP: get_player_profile (career context)
 ├── data/                   # gitignored runtime files
 │   ├── insights.jsonl      # one record per agent-generated insight
-│   ├── player_profiles.json # MCP career-context cache (populated on demand)
+│   ├── player_profiles.json # MCP career-context cache (populated on demand, no TTL)
+│   ├── team_context.json   # TeamContextProvider cache (24h TTL, keyed by tricode+date)
 │   └── runs.jsonl          # per-run token counts, cost, cache hit rate, duration
 └── tests/
 ```
@@ -265,12 +270,35 @@ No code changes are needed to toggle tracing on or off — it's entirely control
 
 ---
 
+## Reference grounding
+
+LLMs hallucinate facts they weren't trained on — or trained on outdated versions of. For sports, the most common symptom is a stale coach: the model confidently names last season's head coach because that's what it saw most often during training.
+
+The fix is `TeamContextProvider` in `src/team_context.py`. Before every `generate_insight` call, it fetches the current head coach, win-loss record, playoff seed, and active roster for both teams from `nba_api` and injects them into the narrator's prompt as a grounding block:
+
+```
+Team context (authoritative):
+Home: LAL (coach: JJ Redick, 53-29, seed 4)
+Away: GSW (coach: Steve Kerr, 37-45, seed 10)
+```
+
+The narrator's system prompt instructs it to treat this block as ground truth and omit any coach or roster fact not present in it. Injection is non-optional — it happens on every analyze path regardless of what tools the classifier called.
+
+**Two consumers, one provider.** The same `TeamContextProvider` singleton also backs a `get_team_context(team_tricode)` tool visible to the classifier. The injection path is the floor (always runs); the tool is the ceiling (classifier reaches for it when standings or roster depth would change its routing decision — e.g., a team in a tight playoff race).
+
+**Cache design.** Results are cached to `data/team_context.json` with a 24h TTL, keyed by `(team_tricode, game_date)`. Career profiles (`player_profiles.json`) cache forever — coaches get fired, career stats don't. The key includes the game date so each day gets its own snapshot; cross-day bleed is impossible.
+
+**Why local, not MCP.** `get_player_profile` sits behind MCP because it's permanent reference data cleanly separable from the per-event surface. Team context is the opposite: TTL-bound, session-current, and needed synchronously inside the graph before `generate_insight` runs. The rule: *permanent reference data is remote; session-current data is local.*
+
+---
+
 ## Roadmap
 
 Beyond the current scope:
 
 - ~~Swap simulated play-by-play for a live WebSocket feed~~ — done as polling against `cdn.nba.com/static/json/liveData/*` (see `src/producer_live.py`)
 - ~~Add an MCP server tool (`get_player_profile`) to demonstrate MCP + LangGraph integration~~ — done
+- ~~Reference grounding for current-season team context (coach, record, roster)~~ — done (see Reference grounding section above)
 - ~~LangSmith tracing for observability~~ — done (see Observability section above)
 - FastAPI endpoint exposing the insight stream
 - ~~PostgreSQL persistence for raw plays + agent decisions~~ — done (`src/db.py`, `asyncpg`, postgres service in Docker Compose)
