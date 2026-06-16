@@ -22,7 +22,8 @@ Simulated Play-by-Play (nba_api) → Kafka Producer → Kafka Topic → LangGrap
 - **Producer — live** (`producer_live.py`): Polls the NBA's live JSON CDN via `nba_live_client.py` and publishes new plays as they appear. Auto-discovers an in-progress game from today's scoreboard, or streams a specific `NBA_GAME_ID` if set.
 - **Live client** (`nba_live_client.py`): Thin `requests`-based wrapper around `cdn.nba.com/static/json/liveData/{scoreboard,playbyplay}`. Bypasses `nba_api.live` (whose default headers are now blocked by NBA's CDN).
 - **Consumer + Agent** (`agent.py`): Async Kafka consumer that feeds each event into the LangGraph agent. The agent reasons over the event and decides whether to act. Spawns the MCP subprocess at startup and holds the stdio session open for the run.
-- **Tools** (`tools.py`): Local tools (`get_player_stats`, `analyze_momentum`, `send_alert`).
+- **Tools** (`tools.py`): Local tools (`get_player_stats`, `analyze_momentum`, `get_team_context`, `send_alert`).
+- **Team context** (`team_context.py`): `TeamContextProvider` — fetches current-season coach, record, seed, and roster from `nba_api`. Cache at `data/team_context.json` with 24h TTL, keyed by `(team_tricode, game_date)`. Shared by the injection path in `generate_insight` (grounding floor) and the `get_team_context` tool (classifier opt-in).
 - **MCP server** (`mcp_server/server.py`): Separate stdio subprocess exposing one tool — `get_player_profile` — for career-level player context (bio, draft, school, previous teams, career averages, postseason career highs). Persistent disk cache at `data/player_profiles.json` so the per-player nba_api fetch happens once, ever.
 - **State** (`state.py`): Typed state schema passed through the LangGraph graph.
 - **Output** (`output.py`): Handles insight logging (console + JSON file).
@@ -43,15 +44,18 @@ nba-agent/
 │   ├── nba_live_client.py    # Thin requests wrapper for the live CDN endpoints
 │   ├── agent.py              # LangGraph graph + async Kafka consumer; spawns MCP server
 │   ├── state.py              # AgentState TypedDict
-│   ├── tools.py              # get_player_stats, analyze_momentum, send_alert
+│   ├── tools.py              # get_player_stats, analyze_momentum, get_team_context, send_alert
+│   ├── team_context.py       # TeamContextProvider: coach/record/roster, 24h TTL cache
 │   ├── output.py             # Insight logger
 │   └── mcp_server/
 │       └── server.py         # MCP server: get_player_profile (stdio subprocess)
 ├── data/
 │   ├── insights.jsonl        # Persisted agent outputs (gitignored)
-│   └── player_profiles.json  # MCP cache, populated on demand (gitignored)
+│   ├── player_profiles.json  # MCP cache, populated on demand (gitignored)
+│   └── team_context.json     # TeamContextProvider cache, 24h TTL (gitignored)
 └── tests/
     ├── test_tools.py
+    ├── test_team_context.py
     └── test_agent.py
 ```
 
@@ -87,6 +91,7 @@ class AgentState(TypedDict):
     messages: list               # LangGraph message history
     action: Action               # Enum describing what the agent did with this event
     insight: str | None          # Final generated insight, if any
+    team_context: dict | None    # Home/away team context injected before generate_insight
 ```
 
 ### Who maintains `game_context`
@@ -107,6 +112,9 @@ Looks at the last 5 scoring plays to determine which team has momentum. Returns 
 
 ### `get_player_profile(player_id: str) -> dict` *(MCP-backed)*
 Career-level context: bio, draft (year/round/pick), school, current + previous teams (chronological, return-to-team order preserved), career averages (ppg/rpg/apg), postseason career highs. Lives in a separate stdio subprocess (`src/mcp_server/server.py`) bridged into the LangGraph agent via `langchain-mcp-adapters`. Persistent disk cache at `data/player_profiles.json`.
+
+### `get_team_context(team_tricode: str) -> dict`
+Current-season team context: head coach, win-loss record, playoff seed, active roster. Thin wrapper over `TeamContextProvider` (see below). Available to the classifier as opt-in depth — the baseline (coach + record) is always injected into `generate_insight` automatically, so the classifier calls this only when standings or fuller roster context would change its routing decision.
 
 ### `send_alert(insight: str, severity: str) -> None`
 Logs the insight to stdout and appends it to `data/insights.jsonl`. Severity levels: `"routine"` | `"notable"` | `"critical"`.
@@ -133,8 +141,8 @@ This is an **agentic loop**, not a fixed pipeline. The model decides which tools
 
 ### Nodes
 - **`classify_event`** — model call. Receives the raw event, `game_context`, and any prior tool results. Decides among three actions: emit `tool_calls` to gather more data, return plain text to skip, or signal it's ready to generate an insight (e.g., via a structured "ready" sentinel or a final tool call to a no-op `mark_ready` tool).
-- **`call_tools`** — executes any of `get_player_stats`, `analyze_momentum`, or the MCP-bridged `get_player_profile`, appends results to `messages`, routes back to `classify_event`. The MCP tool is invoked async over the persistent stdio session opened in `main()`.
-- **`generate_insight`** — dedicated node (not a tool) that calls Claude Sonnet 4.6 with the accumulated context to produce a 2–3 sentence ESPN-style narrative. Sets `state.insight`.
+- **`call_tools`** — executes any of `get_player_stats`, `analyze_momentum`, `get_team_context`, or the MCP-bridged `get_player_profile`, appends results to `messages`, routes back to `classify_event`. The MCP tool is invoked async over the persistent stdio session opened in `main()`.
+- **`generate_insight`** — dedicated node (not a tool) that calls Claude Sonnet 4.6 with the accumulated context to produce a 2–3 sentence ESPN-style narrative. Before invoking the LLM, fetches home and away team context via `TeamContextProvider` and injects a grounding block into the prompt — non-optional, so the narrator never has to assert coach/roster facts from training-data priors. Sets `state.insight`.
 - **`send_alert`** — tool node that logs and persists the insight.
 
 ### Conditional edges
@@ -281,6 +289,7 @@ you have the legacy `docker-compose` binary installed, that works too.
   5s poll gives ~10-30s end-to-end latency, which is fine for the demo. See
   `src/producer_live.py`.
 - ~~Add an MCP server tool (`get_player_profile`) to demonstrate MCP + LangGraph integration~~ — done. See `src/mcp_server/server.py` and the MCP section in the README.
+- ~~Add reference grounding to prevent hallucinated coach/roster facts~~ — done. See `src/team_context.py`.
 - Add a LangSmith tracing integration for observability
 - Expose insights via a simple FastAPI endpoint
 
@@ -295,3 +304,10 @@ Open items deferred from the first pass. Address before considering the project 
   happy-path test (mocking both LLMs) is still missing as a nice-to-have.
 - [x] **Replace `.env` with `.env.example` in the repo.** Done.
 - [x] **Pull the MCP server tool forward from Phase 2.** Done — `get_player_profile` lives in `src/mcp_server/server.py` as a FastMCP stdio server, bridged into the agent via `langchain-mcp-adapters`. Caches to `data/player_profiles.json`. "Recent news" was dropped from the spec (no clean nba_api source); accolades likewise.
+- [x] **Add reference grounding for current-season team context.** Done — `TeamContextProvider` in `src/team_context.py` fetches coach, record, seed, and roster from `nba_api` with a 24h TTL cache keyed by `(team_tricode, game_date)`. Injected non-optionally into `generate_insight` (grounding floor) and exposed as `get_team_context` in the classifier loop (opt-in depth). Fixes hallucinated coach names from training-data priors.
+
+### `TeamContextProvider` — freshness vs. career profiles
+
+`player_profiles.json` caches forever (career data doesn't change). `team_context.json` expires after 24h — coaches get fired, trades happen, standings change. Every cache entry carries a `fetched_at` timestamp; reads past the TTL trigger a silent refetch. Cache key is `(team_tricode, game_date)` so each game day gets its own snapshot and cross-day bleed is impossible.
+
+MCP boundary rationale: team context stays local (not behind MCP) because the injection path needs it synchronously inside the graph. The rule: *permanent reference data is remote, session-current data is local.*
